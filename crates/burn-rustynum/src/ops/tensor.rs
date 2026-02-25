@@ -65,35 +65,59 @@ impl FloatTensorOps<Self> for RustyNum {
     }
 
     fn float_add(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
-        binary_float_op(&lhs, &rhs, |a, b| a + b)
+        #[cfg(feature = "simd")]
+        { simd_add_f32(&lhs, &rhs) }
+        #[cfg(not(feature = "simd"))]
+        { binary_float_op(&lhs, &rhs, |a, b| a + b) }
     }
 
     fn float_add_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
-        scalar_float_op(&lhs, rhs, |a, s| a + s)
+        #[cfg(feature = "simd")]
+        { simd_add_scalar_f32(&lhs, rhs.elem()) }
+        #[cfg(not(feature = "simd"))]
+        { scalar_float_op(&lhs, rhs, |a, s| a + s) }
     }
 
     fn float_sub(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
-        binary_float_op(&lhs, &rhs, |a, b| a - b)
+        #[cfg(feature = "simd")]
+        { simd_sub_f32(&lhs, &rhs) }
+        #[cfg(not(feature = "simd"))]
+        { binary_float_op(&lhs, &rhs, |a, b| a - b) }
     }
 
     fn float_sub_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
-        scalar_float_op(&lhs, rhs, |a, s| a - s)
+        #[cfg(feature = "simd")]
+        { simd_sub_scalar_f32(&lhs, rhs.elem()) }
+        #[cfg(not(feature = "simd"))]
+        { scalar_float_op(&lhs, rhs, |a, s| a - s) }
     }
 
     fn float_mul(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
-        binary_float_op(&lhs, &rhs, |a, b| a * b)
+        #[cfg(feature = "simd")]
+        { simd_mul_f32(&lhs, &rhs) }
+        #[cfg(not(feature = "simd"))]
+        { binary_float_op(&lhs, &rhs, |a, b| a * b) }
     }
 
     fn float_mul_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
-        scalar_float_op(&lhs, rhs, |a, s| a * s)
+        #[cfg(feature = "simd")]
+        { simd_mul_scalar_f32(&lhs, rhs.elem()) }
+        #[cfg(not(feature = "simd"))]
+        { scalar_float_op(&lhs, rhs, |a, s| a * s) }
     }
 
     fn float_div(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
-        binary_float_op(&lhs, &rhs, |a, b| a / b)
+        #[cfg(feature = "simd")]
+        { simd_div_f32(&lhs, &rhs) }
+        #[cfg(not(feature = "simd"))]
+        { binary_float_op(&lhs, &rhs, |a, b| a / b) }
     }
 
     fn float_div_scalar(lhs: FloatTensor<Self>, rhs: Scalar) -> FloatTensor<Self> {
-        scalar_float_op(&lhs, rhs, |a, s| a / s)
+        #[cfg(feature = "simd")]
+        { simd_div_scalar_f32(&lhs, rhs.elem()) }
+        #[cfg(not(feature = "simd"))]
+        { scalar_float_op(&lhs, rhs, |a, s| a / s) }
     }
 
     fn float_remainder(lhs: FloatTensor<Self>, rhs: FloatTensor<Self>) -> FloatTensor<Self> {
@@ -482,6 +506,78 @@ fn binary_float_op(lhs: &RustyNumTensor, rhs: &RustyNumTensor, op: impl Fn(f32, 
     }
 }
 
+/// SIMD-accelerated element-wise add (same-shape fast path).
+#[cfg(feature = "simd")]
+fn simd_add_f32(lhs: &RustyNumTensor, rhs: &RustyNumTensor) -> RustyNumTensor {
+    if lhs.shape == rhs.shape {
+        let out = rustynum_core::simd::add_f32_vec(lhs.as_f32(), rhs.as_f32());
+        RustyNumTensor::from_f32(out, lhs.shape.clone())
+    } else {
+        broadcast_binary_op(lhs, rhs, |a, b| a + b)
+    }
+}
+
+/// SIMD-accelerated element-wise subtract (same-shape fast path).
+#[cfg(feature = "simd")]
+fn simd_sub_f32(lhs: &RustyNumTensor, rhs: &RustyNumTensor) -> RustyNumTensor {
+    if lhs.shape == rhs.shape {
+        let out = rustynum_core::simd::sub_f32_vec(lhs.as_f32(), rhs.as_f32());
+        RustyNumTensor::from_f32(out, lhs.shape.clone())
+    } else {
+        broadcast_binary_op(lhs, rhs, |a, b| a - b)
+    }
+}
+
+/// SIMD-accelerated element-wise multiply (same-shape fast path).
+#[cfg(feature = "simd")]
+fn simd_mul_f32(lhs: &RustyNumTensor, rhs: &RustyNumTensor) -> RustyNumTensor {
+    if lhs.shape == rhs.shape {
+        let out = rustynum_core::simd::mul_f32_vec(lhs.as_f32(), rhs.as_f32());
+        RustyNumTensor::from_f32(out, lhs.shape.clone())
+    } else {
+        broadcast_binary_op(lhs, rhs, |a, b| a * b)
+    }
+}
+
+/// SIMD-accelerated element-wise divide (same-shape fast path).
+#[cfg(feature = "simd")]
+fn simd_div_f32(lhs: &RustyNumTensor, rhs: &RustyNumTensor) -> RustyNumTensor {
+    if lhs.shape == rhs.shape {
+        let out = rustynum_core::simd::div_f32_vec(lhs.as_f32(), rhs.as_f32());
+        RustyNumTensor::from_f32(out, lhs.shape.clone())
+    } else {
+        broadcast_binary_op(lhs, rhs, |a, b| a / b)
+    }
+}
+
+/// SIMD-accelerated scalar add.
+#[cfg(feature = "simd")]
+fn simd_add_scalar_f32(tensor: &RustyNumTensor, scalar: f32) -> RustyNumTensor {
+    let out = rustynum_core::simd::add_f32_scalar(tensor.as_f32(), scalar);
+    RustyNumTensor::from_f32(out, tensor.shape.clone())
+}
+
+/// SIMD-accelerated scalar subtract.
+#[cfg(feature = "simd")]
+fn simd_sub_scalar_f32(tensor: &RustyNumTensor, scalar: f32) -> RustyNumTensor {
+    let out = rustynum_core::simd::sub_f32_scalar(tensor.as_f32(), scalar);
+    RustyNumTensor::from_f32(out, tensor.shape.clone())
+}
+
+/// SIMD-accelerated scalar multiply.
+#[cfg(feature = "simd")]
+fn simd_mul_scalar_f32(tensor: &RustyNumTensor, scalar: f32) -> RustyNumTensor {
+    let out = rustynum_core::simd::mul_f32_scalar(tensor.as_f32(), scalar);
+    RustyNumTensor::from_f32(out, tensor.shape.clone())
+}
+
+/// SIMD-accelerated scalar divide.
+#[cfg(feature = "simd")]
+fn simd_div_scalar_f32(tensor: &RustyNumTensor, scalar: f32) -> RustyNumTensor {
+    let out = rustynum_core::simd::div_f32_scalar(tensor.as_f32(), scalar);
+    RustyNumTensor::from_f32(out, tensor.shape.clone())
+}
+
 /// Broadcast two tensors and apply a binary op.
 fn broadcast_binary_op(lhs: &RustyNumTensor, rhs: &RustyNumTensor, op: impl Fn(f32, f32) -> f32) -> RustyNumTensor {
     let out_shape = broadcast_shape(&lhs.shape, &rhs.shape);
@@ -636,12 +732,27 @@ fn matmul_impl(lhs: &RustyNumTensor, rhs: &RustyNumTensor) -> RustyNumTensor {
         let b_mat = &rhs_data[rb * rhs_stride..(rb + 1) * rhs_stride];
         let c = &mut out[b * out_stride..(b + 1) * out_stride];
 
-        // Simple row-major matmul: C[i,j] = sum_p A[i,p] * B[p,j]
-        for i in 0..m {
-            for p in 0..k {
-                let a_ip = a[i * k + p];
-                for j in 0..n {
-                    c[i * n + j] += a_ip * b_mat[p * n + j];
+        #[cfg(feature = "simd")]
+        {
+            // AVX-512 Goto BLAS sgemm: cache-blocked microkernel, multi-threaded for large matrices
+            rustyblas::level3::sgemm(
+                rustyblas::Layout::RowMajor,
+                rustyblas::Transpose::NoTrans,
+                rustyblas::Transpose::NoTrans,
+                m, n, k,
+                1.0, a, k,
+                b_mat, n,
+                0.0, c, n,
+            );
+        }
+        #[cfg(not(feature = "simd"))]
+        {
+            for i in 0..m {
+                for p in 0..k {
+                    let a_ip = a[i * k + p];
+                    for j in 0..n {
+                        c[i * n + j] += a_ip * b_mat[p * n + j];
+                    }
                 }
             }
         }
