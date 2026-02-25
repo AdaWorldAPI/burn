@@ -1113,6 +1113,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-rustynum"
+version = "0.1.0"
+dependencies = [
+ "burn-backend",
+ "burn-ir",
+ "burn-std",
+ "libm",
+ "num-traits",
+ "rand 0.10.0",
+]
+
+[[package]]
 name = "burn-std"
 version = "0.21.0-pre.1"
 dependencies = [
