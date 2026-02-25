@@ -108,9 +108,13 @@ pub enum RustyNumTensor {
     I32 { data: Arc<Vec<i32>>, shape: Vec<usize>, strides: Vec<usize> },
     U8  { data: Arc<Vec<u8>>,  shape: Vec<usize>, strides: Vec<usize> },
     Bool { data: Arc<Vec<bool>>, shape: Vec<usize>, strides: Vec<usize> },
-    /// Zero-copy view into a Blackboard allocation.
-    /// The `_backing` guard keeps the Blackboard alive.
-    BlackboardView {
+    /// Zero-copy view into an external allocation (Blackboard buffer, Arrow buffer, etc.).
+    /// The `_backing` guard keeps the source allocation alive.
+    ///
+    /// SAFETY INVARIANT: `_backing` must keep `ptr..ptr+len` alive for the
+    /// lifetime of this tensor. For Blackboard buffers, the backing must be
+    /// an extracted `AlignedBuffer` (not `Arc<Blackboard>` — see Section 7).
+    ExternalView {
         ptr: *const u8,
         len: usize,
         dtype: DType,
@@ -125,7 +129,9 @@ pub enum RustyNumTensor {
 
 1. **`Arc<Vec<T>>`** for COW semantics (same as ndarray's `ArcArray`). Mutations check `Arc::get_mut()` — if unique, mutate in-place; if shared, clone-then-mutate.
 
-2. **`BlackboardView`** variant enables zero-copy from rustynum-core's `Blackboard` allocator. The `_backing: Arc<dyn Any>` pattern is directly from ort (`/home/user/ort/src/value/mod.rs:60`).
+2. **`ExternalView`** variant enables zero-copy from external allocations (Blackboard named buffers, Arrow buffers). The `_backing: Arc<dyn Any>` pattern is from ort (`/home/user/ort/src/value/mod.rs:60`).
+   - **IMPORTANT**: For Blackboard buffers, `_backing` must NOT hold `Arc<Blackboard>` directly — Blackboard is `!Send + !Sync` and dropping it frees all named buffers. Instead, extract an `AlignedBuffer` that owns the memory independently (see Section 7).
+   - For Arrow buffers, `_backing` holds `Arc<arrow::Buffer>` which is ref-counted and safe.
 
 3. **Contiguous-only** for V1. Rustynum's SIMD kernels require contiguous memory. Strides are metadata-only (for reshape/transpose tracking) and any non-contiguous operation triggers an explicit `to_contiguous()` copy. This mirrors candle's approach where the CPU backend enforces contiguous layout at kernel boundaries.
 
@@ -242,49 +248,160 @@ fn float_matmul_bf16(lhs_bf16: &[u16], rhs_bf16: &[u16], m: usize, k: usize, n: 
 
 ## 7. Zero-Copy Blackboard → Burn Tensor Path
 
+### 7.0 Architecture: Two Blackboards, One Principle
+
+There are **two distinct Blackboard concepts** in the system. The plan must not conflate them:
+
+| | rustynum-core `Blackboard` | ladybug-rs TypedSlots |
+|---|---|---|
+| **What** | SIMD-aligned named buffer allocator | Semantic agent state surface |
+| **Keys** | `"A"`, `"B"`, `"C"` (GEMM operands) | `"awareness:frame"`, `"awareness:nars"` |
+| **Types** | `get_f32("name")` → `Option<&[f32]>` | `Box<dyn Any + Send + Sync>` (AwarenessFrame, NarsTruth, SpoTriple) |
+| **Thread safety** | `!Send + !Sync` (needs Mutex) | `Send + Sync` by design |
+| **Layer** | HW driver (bottom) | Cognitive surface (top) |
+
+**The invariant**: Agents write semantic types (AwarenessFrame, NarsTruth, SpoTriple) to
+TypedSlots on the ladybug-rs Blackboard. BindSpace decides where to persist them (LanceDB,
+CogRedis, memory). When inference is needed, the pipeline stages data INTO rustynum's
+SIMD Blackboard for the burn forward pass. Agents never see burn tensors.
+
+```
+Agent → TypedSlots (awareness:frame) → BindSpace → Storage
+                                                       ↓ (inference pipeline)
+                                            rustynum Blackboard (SIMD arena)
+                                                       ↓
+                                            burn-rustynum tensors
+```
+
 ### 7.1 The Problem
 
-CogRecord containers sit on rustynum-core's Blackboard (64-byte aligned arena). Burn needs to read embeddings from these containers without copying into a new allocation.
+Data staged on rustynum-core's Blackboard (64-byte aligned named buffers) needs to reach
+burn tensors without unnecessary copies. The Blackboard uses **name-based** buffer lookup
+(`get_f32("embed")` → `Option<&[f32]>`), not offset-based pointer arithmetic.
 
-### 7.2 The Solution (Inspired by ort's `_backing` Guard)
+### 7.2 The Solution: Extract-and-Own (Inspired by ort's `_backing` Guard)
+
+**Why not `Arc<Blackboard>`?**
+- Blackboard is `!Send + !Sync` (raw pointers + PhantomData marker) — can't wrap in Arc
+- Even if it could, `alloc_f32("name", new_len)` frees the old buffer, dangling any pointers
+- Blackboard's `Drop` impl deallocates ALL named buffers — ptr would dangle
+
+**Solution: Extract an owned aligned buffer from Blackboard, then hand ownership to the tensor.**
 
 ```rust
-/// Create a Burn tensor that borrows directly from a Blackboard allocation.
-pub fn tensor_from_blackboard(
-    blackboard: Arc<Blackboard>,
-    offset: usize,
-    shape: Vec<usize>,
-    dtype: DType,
-) -> RustyNumTensor {
-    let total_bytes = shape.iter().product::<usize>() * dtype.size();
-    let ptr = blackboard.as_ptr().add(offset);
+/// SIMD-aligned owned buffer extracted from Blackboard.
+/// Send + Sync safe because it owns its allocation exclusively.
+pub struct AlignedBuffer {
+    ptr: *mut u8,
+    len_bytes: usize,
+    layout: std::alloc::Layout,
+}
 
-    RustyNumTensor::BlackboardView {
-        ptr,
-        len: total_bytes,
+// SAFETY: AlignedBuffer exclusively owns its allocation (no aliasing)
+unsafe impl Send for AlignedBuffer {}
+unsafe impl Sync for AlignedBuffer {}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.layout.size() > 0 {
+            unsafe { std::alloc::dealloc(self.ptr, self.layout) };
+        }
+    }
+}
+
+/// Create a Burn tensor from a named Blackboard buffer.
+///
+/// This MOVES the buffer out of the Blackboard (the Blackboard no longer owns it).
+/// The tensor exclusively owns the aligned memory via AlignedBuffer.
+pub fn tensor_from_blackboard_named(
+    blackboard: &mut Blackboard,
+    buffer_name: &str,
+    shape: Vec<usize>,
+) -> Result<RustyNumTensor, String> {
+    // Use Blackboard's raw_ptr API to get the buffer metadata
+    let (ptr, len, dtype) = unsafe {
+        blackboard.raw_ptr(buffer_name)
+            .ok_or_else(|| format!("buffer '{}' not found", buffer_name))?
+    };
+    let elem_size = dtype.element_size();
+    let byte_len = len * elem_size;
+
+    // Allocate a new aligned buffer and copy (Blackboard retains original)
+    let layout = std::alloc::Layout::from_size_align(byte_len.max(1), 64)
+        .map_err(|e| format!("layout error: {}", e))?;
+    let new_ptr = unsafe { std::alloc::alloc(layout) };
+    if new_ptr.is_null() {
+        return Err("allocation failed".to_string());
+    }
+    unsafe { std::ptr::copy_nonoverlapping(ptr as *const u8, new_ptr, byte_len) };
+
+    let backing = Arc::new(AlignedBuffer { ptr: new_ptr, len_bytes: byte_len, layout });
+
+    Ok(RustyNumTensor::ExternalView {
+        ptr: new_ptr as *const u8,
+        len: byte_len,
         dtype,
         shape: shape.clone(),
         strides: compute_c_strides(&shape),
-        _backing: blackboard,  // Keeps Blackboard alive
-    }
+        _backing: backing,
+    })
 }
 ```
 
-**Mutating a BlackboardView** triggers copy-on-write: the data is copied to a new `Arc<Vec<T>>` and the variant changes from `BlackboardView` to the owned variant.
+**Alternative (true zero-copy):** If the Blackboard buffer is known to be long-lived and
+exclusively owned, use `raw_ptr()` directly without copying. This requires a contract that
+no `alloc_*()` call will reuse the buffer name while the tensor is live.
+
+**Mutating an ExternalView** triggers copy-on-write: the data is copied to a new `Arc<Vec<T>>` and the variant changes from `ExternalView` to the owned variant.
 
 ### 7.3 CogRecord → Burn Tensor Extraction
 
+CogRecord is an owned struct with 4 `NumArrayU8` fields (meta, cam, btree, embed), not a
+flat arena. To create a tensor from CogRecord's embedding:
+
 ```rust
-/// Extract a specific field from a CogRecord as a Burn tensor.
-/// Zero-copy when the CogRecord lives on the Blackboard.
+/// Extract embedding from a CogRecord as a Burn tensor.
+///
+/// CogRecord.embed is a NumArrayU8 (2KB = 512 f32s or 1024 bf16s).
+/// This copies the embed data into an owned tensor — CogRecord is
+/// an in-memory struct, not a Blackboard allocation.
 pub fn cogrecord_embedding_to_tensor(
     cogrecord: &CogRecord,
-    blackboard: Arc<Blackboard>,
 ) -> RustyNumTensor {
-    // CogRecord stores 1024-D f32 embedding at known offset
-    let embed_offset = cogrecord.embed_offset();
-    let embed_dim = cogrecord.embed_dim();
-    tensor_from_blackboard(blackboard, embed_offset, vec![embed_dim], DType::F32)
+    // CogRecord.embed is a NumArrayU8 containing the raw embedding bytes
+    let embed_bytes: &[u8] = cogrecord.embed.data();
+    let embed_f32: Vec<f32> = embed_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let dim = embed_f32.len();
+    RustyNumTensor::F32 {
+        data: Arc::new(embed_f32),
+        shape: vec![dim],
+        strides: vec![1],
+    }
+}
+
+/// Batch CogRecords into a 2D tensor [batch_size, embed_dim].
+/// For hot-path inference, stage CogRecords into Blackboard named buffers
+/// first, then use tensor_from_blackboard_named().
+pub fn cogrecord_batch_to_tensor(
+    records: &[CogRecord],
+) -> RustyNumTensor {
+    let dim = records[0].embed.data().len() / 4; // f32 = 4 bytes
+    let batch_size = records.len();
+    let mut data = Vec::with_capacity(batch_size * dim);
+    for rec in records {
+        let bytes = rec.embed.data();
+        for chunk in bytes.chunks_exact(4) {
+            data.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+    }
+    RustyNumTensor::F32 {
+        data: Arc::new(data),
+        shape: vec![batch_size, dim],
+        strides: compute_c_strides(&[batch_size, dim]),
+    }
 }
 ```
 
@@ -348,7 +465,7 @@ pub fn threshold_to_hypervector(
 DataFusion SQL Query
   → RecordBatch (Arrow columnar)
     → arrow_to_rustynum_tensor()  [zero-copy via Arrow buffer reference]
-      → RustyNumTensor::BlackboardView or RustyNumTensor::F32
+      → RustyNumTensor::ExternalView or RustyNumTensor::F32
         → Burn Tensor input
 ```
 
@@ -368,7 +485,7 @@ pub fn arrow_column_to_tensor(
 
     // If aligned to 64 bytes, we can reference directly
     if (slice.as_ptr() as usize) % 64 == 0 {
-        RustyNumTensor::BlackboardView {
+        RustyNumTensor::ExternalView {
             ptr: slice.as_ptr() as *const u8,
             len: slice.len() * 4,
             dtype: DType::F32,
@@ -528,6 +645,60 @@ Methods requiring implementation (extracted from `burn-backend/src/backend/ops/t
 3. Zero-copy CogRecord → Burn tensor path verified with valgrind (no unnecessary allocations)
 4. INT8 VNNI inference path functional with per-channel dequantization
 5. End-to-end: DataFusion SQL → filter → hydrate → burn forward → threshold → hypervector
+
+---
+
+## 15. Architecture Alignment Audit (Post-Review)
+
+This section documents alignment issues found when checking the plan against the
+actual BindSpace/Blackboard/TypedSlot architecture (Feb 25, 2026).
+
+### Issues Found and Resolved
+
+| # | Issue | Severity | Resolution |
+|---|-------|----------|------------|
+| A1 | Plan conflated rustynum `Blackboard` (SIMD arena) with ladybug-rs `TypedSlots` (semantic surface) | **CRITICAL** | Section 7.0 now distinguishes the two; added architecture ladder |
+| A2 | `BlackboardView` used `Arc<Blackboard>` but Blackboard is `!Send+!Sync` | **CRITICAL** | Renamed to `ExternalView`; uses `Arc<AlignedBuffer>` (extract-and-own) |
+| A3 | `blackboard.as_ptr().add(offset)` — no such API; Blackboard uses named buffers | **CRITICAL** | Replaced with `raw_ptr(name)` → copy → `AlignedBuffer` |
+| A4 | `cogrecord.embed_offset()` — no such method; CogRecord is an owned struct | **MODERATE** | Replaced with `cogrecord.embed.data()` byte extraction |
+| A5 | Plan assumed `StorageBackend` trait — BindSpace IS the storage, not behind a trait | **MODERATE** | Section 7.0 documents the actual architecture ladder |
+| A6 | Buffer reallocation dangling pointer — `alloc_f32("X", n)` frees old "X" | **CRITICAL** | Extract-and-own pattern; tensor owns memory independently |
+
+### Architecture Ladder (Actual)
+
+```
+Agents
+  │  write AwarenessFrame / NarsTruth / SpoTriple
+  │  (same types for internal agents and MCP/REST — JSON at boundary only)
+  ▼
+ladybug-rs TypedSlots (Box<dyn Any + Send + Sync>)
+  │  slot keys: awareness:frame, awareness:nars, awareness:spo_triples
+  ▼
+BindSpace (pure array indexing, 8-bit prefix : 8-bit slot, 3-5 cycles)
+  │  read(Addr) → &BindNode, write(Addr, data)
+  ▼
+Storage (swappable at BindSpace level)
+  ├── LanceDB (Arrow FixedSizeBinary, zero-copy mmap)
+  ├── CogRedis (direct &[u8] slices)
+  └── Memory (Vec<u8>)
+
+--- inference pipeline boundary ---
+
+rustynum-core Blackboard (SIMD arena, 64-byte aligned named buffers)
+  │  alloc_f32("embed", 512), get_f32("embed") → &[f32]
+  │  borrow_3_mut_f32("A", "B", "C") → split-borrow for GEMM
+  ▼
+burn-rustynum (ExternalView tensors, sgemm/int8_gemm/bf16_gemm)
+  ▼
+Output: continuous tensor → SIMD threshold → discrete 16K-bit hypervector
+```
+
+### Key Principle Verified
+
+**Agents never touch the storage layer or the SIMD arena.** They write semantic types
+to TypedSlots. BindSpace decides where to persist. When inference is needed, an
+orchestration layer (not an agent) stages data into the rustynum SIMD Blackboard
+and invokes the burn forward pass. The result flows back as semantic types.
 
 ---
 
