@@ -1113,6 +1113,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-rustynum"
+version = "0.1.0"
+dependencies = [
+ "burn-backend",
+ "burn-ir",
+ "burn-std",
+ "libm",
+ "num-traits",
+ "rand 0.10.0",
+ "rustyblas",
+ "rustynum-core",
+]
+
+[[package]]
 name = "burn-std"
 version = "0.21.0-pre.1"
 dependencies = [
@@ -7780,6 +7794,20 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rustyblas"
+version = "0.1.0"
+dependencies = [
+ "rustynum-core",
+]
+
+[[package]]
+name = "rustynum-core"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+]
 
 [[package]]
 name = "ryu"
