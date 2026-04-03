@@ -5,19 +5,19 @@ use burn_backend::{
 };
 use burn_backend::{TensorMetadata, ops::unfold::calculate_unfold_shape};
 use burn_std::{
-    Metadata, strides,
+    Metadata, QuantValue, ReshapeAnalysis, reshape_analysis, strides,
     tensor::{ReshapeAction, contiguous_strides, reshape_action},
 };
-use cubecl::{ir::LineSize, server::CopyDescriptor};
-use cubecl::{quant::scheme::BlockSize, tensor_line_size_parallel};
+use cubecl::{ir::VectorSize, server::CopyDescriptor};
+use cubecl::{quant::scheme::BlockSize, tensor_vector_size_parallel};
 
 pub(crate) fn from_data<R: CubeRuntime>(data: TensorData, device: &R::Device) -> CubeTensor<R> {
     let client = R::client(device);
-    let alloc = client.create_tensor(data.bytes, &data.shape, data.dtype.size());
+    let alloc = client.create_tensor(data.bytes, data.shape.clone(), data.dtype.size());
     let shape: Shape = (&data.shape).into();
     CubeTensor::new(
         client,
-        alloc.handle,
+        alloc.memory,
         Metadata::new(shape, alloc.strides),
         device.clone(),
         data.dtype,
@@ -30,8 +30,8 @@ pub(crate) async fn into_data<R: CubeRuntime>(
     let tensor = kernel::into_contiguous_aligned(tensor);
 
     let elem_size = tensor.elem_size();
-    let shape = tensor.meta.shape();
-    let strides = tensor.meta.strides();
+    let shape = tensor.meta.shape().clone();
+    let strides = tensor.meta.strides().clone();
     let binding = CopyDescriptor::new(tensor.handle.binding(), shape, strides, elem_size);
     let bytes = tensor
         .client
@@ -43,7 +43,7 @@ pub(crate) async fn into_data<R: CubeRuntime>(
 
     Ok(TensorData::from_bytes(
         bytes,
-        tensor.meta.shape,
+        tensor.meta.shape.clone(),
         tensor.dtype,
     ))
 }
@@ -77,11 +77,11 @@ pub(crate) fn empty<R: CubeRuntime>(
     dtype: DType,
 ) -> CubeTensor<R> {
     let client = R::client(device);
-    let alloc = client.empty_tensor(&shape, dtype.size());
+    let alloc = client.empty_tensor(shape.clone(), dtype.size());
 
     CubeTensor::new(
         client,
-        alloc.handle,
+        alloc.memory,
         Metadata::new(shape, alloc.strides),
         device.clone(),
         dtype,
@@ -267,12 +267,12 @@ pub(crate) fn expand<R: CubeRuntime>(tensor: CubeTensor<R>, target_shape: Shape)
     }
 
     CubeTensor {
-        client: tensor.client,
-        device: tensor.device,
+        client: tensor.client.clone(),
+        device: tensor.device.clone(),
         meta: Box::new(Metadata::new(target_shape, new_strides)),
-        handle: tensor.handle,
+        handle: tensor.handle.clone(),
         dtype: tensor.dtype,
-        qparams: tensor.qparams,
+        qparams: tensor.qparams.clone(),
     }
 }
 
@@ -297,12 +297,11 @@ pub fn reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeT
     );
 
     cubecl::std::tensor::copy_into(
-        &tensor.client,
-        &tensor.as_handle_ref(),
-        &out.as_handle_ref(),
-        tensor.dtype.into(),
-    )
-    .expect("Kernel should not fail");
+        &out.client,
+        tensor.binding(),
+        out.clone().binding(),
+        out.dtype.into(),
+    );
 
     out
 }
@@ -310,20 +309,101 @@ pub fn reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeT
 /// Reshape a jit tensor to a new shape
 pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> CubeTensor<R> {
     let scheme = *tensor.scheme();
+    let curr_shape = tensor.meta.shape();
 
-    let shape_values = {
-        let rank = shape.num_dims();
-        let mut shape = shape.clone();
-        shape[rank - 1] = shape[rank - 1].div_ceil(scheme.num_quants());
-        shape
+    let shape_values = match scheme.store {
+        QuantStore::Native => shape.clone(),
+        QuantStore::PackedNative(packed_dim) | QuantStore::PackedU32(packed_dim) => {
+            let rank = shape.num_dims();
+            let mut shape = shape.clone();
+            let packed_d = rank - packed_dim - 1;
+            let num_quants = scheme.num_quants();
+
+            if !shape[packed_d].is_multiple_of(num_quants) {
+                unimplemented!(
+                    "Cannot reshape packed tensor: inner dimension {} is not aligned with packing factor {num_quants}",
+                    shape[packed_d]
+                );
+            }
+
+            if matches!(
+                scheme.value,
+                QuantValue::Q4S | QuantValue::Q4F | QuantValue::Q2S | QuantValue::Q2F
+            ) {
+                // FIXME
+                todo!("Reshape with sub-byte values is not supported")
+            }
+
+            shape[packed_d] = shape[packed_d].div_ceil(num_quants);
+            shape
+        }
     };
-    let shape_scales = params_shape(&shape, scheme.level);
+
     let (values, scales) = tensor.quantized_handles().unwrap();
+    let analysis_values = reshape_analysis(
+        values.meta.shape(),
+        Some(values.meta.strides()),
+        &shape_values,
+    );
+    let action_values =
+        analysis_values.action(values.meta.shape(), values.meta.strides(), &shape_values);
 
-    let analysis_values = reshape_action(values.meta.shape(), values.meta.strides(), &shape_values);
-    let analysis_scales = reshape_action(scales.meta.shape(), scales.meta.strides(), &shape_scales);
+    let n_new_dims = shape.num_dims().saturating_sub(curr_shape.num_dims());
+    let is_unsqueeze = n_new_dims > 0 && shape[n_new_dims..] == **curr_shape;
 
-    match (analysis_values, analysis_scales) {
+    // Check valid reshapes
+    if let ReshapeAction::UpdateStrides { .. } = &action_values {
+        match analysis_values {
+            ReshapeAnalysis::IsContiguous => {
+                if let QuantLevel::Block(block_size) = scheme.level
+                    && block_size.len() > 1
+                    && !is_unsqueeze
+                {
+                    // General reshape (e.g. [32, 4] -> [16, 8]): only valid if
+                    // reshaped dimension is aligned with the block boundaries.
+                    unimplemented!("Reshape of ND block-quantized tensor is not yet supported.");
+                }
+            }
+            ReshapeAnalysis::Broadcasted => {} // only preprends unit dims
+            ReshapeAnalysis::Split => {
+                if let QuantLevel::Block(block_size) = scheme.level
+                    && block_size.len() > 1
+                {
+                    // Split reshape (e.g. [32, 4] -> [32, 2, 2]): only valid if
+                    // reshaped dimension is aligned with the block boundaries.
+                    unimplemented!(
+                        "Split reshape of ND block-quantized tensor is not yet supported."
+                    );
+                }
+            }
+            other => unreachable!("Reshape analysis {other:?} should not update strides."),
+        }
+    }
+
+    let shape_last = *shape.last().unwrap();
+
+    let shape_scales = match scheme.level {
+        QuantLevel::Tensor => scales.meta.shape().clone(), // always [1], invariant under reshape
+        QuantLevel::Block(block_size)
+            if block_size.len() == 1 && shape_last < (block_size[0] as usize) =>
+        {
+            // If the new last dimension is smaller than the block size,
+            // it means a single block now spans across multiple rows.
+            if scales.meta.shape().num_elements() > 1 {
+                unimplemented!("Reshape would split a block across multiple rows.");
+            }
+            // Exception: allow if there is exactly 1 block total (essentially per-tensor quantization)
+            scales.meta.shape().clone()
+        }
+        QuantLevel::Block(_) => {
+            // ND blocks: derive scales shape from the new tensor shape
+            params_shape(&shape, scheme.level)
+        }
+    };
+
+    let action_scales = reshape_action(scales.meta.shape(), scales.meta.strides(), &shape_scales);
+
+    match (action_values, action_scales) {
         (
             ReshapeAction::UpdateStrides { strides },
             ReshapeAction::UpdateStrides {
@@ -348,8 +428,17 @@ pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> Cub
 
             qparams.scales.metadata = Metadata::new(shape_scales, scales_strides);
         }
-        (ReshapeAction::NoChange, ReshapeAction::NoChange) => {}
-        _ => {
+        // Any action to recompute
+        (ReshapeAction::Recompute, _) | (_, ReshapeAction::Recompute) => {
+            if let QuantLevel::Block(_) = scheme.level
+                && shape_scales.num_elements() > 1
+            {
+                // Original block boundaries no longer align with the layout, would have to be recomputed
+                unimplemented!(
+                    "Cannot reshape a block-quantized tensor when the reshape requires recomputing the buffer."
+                );
+            }
+
             tensor = kernel::into_contiguous(tensor);
             *tensor.meta = Metadata::new(shape, contiguous_strides(&shape_values));
 
@@ -358,29 +447,30 @@ pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> Cub
             let strides = contiguous_strides(&shape_scales);
             qparams.scales.metadata = Metadata::new(shape_scales, strides);
         }
+        (ReshapeAction::NoChange, ReshapeAction::NoChange) => {}
     }
 
     tensor
 }
 
-pub(crate) fn max_line_size<R: CubeRuntime>(tensor: &CubeTensor<R>) -> LineSize {
-    tensor_line_size_parallel(
-        tensor.client.io_optimized_line_sizes(tensor.dtype.size()),
+pub(crate) fn max_vector_size<R: CubeRuntime>(tensor: &CubeTensor<R>) -> VectorSize {
+    tensor_vector_size_parallel(
+        tensor.client.io_optimized_vector_sizes(tensor.dtype.size()),
         tensor.meta.shape(),
         tensor.meta.strides(),
         tensor.meta.num_dims() - 1,
     )
 }
 
-pub(crate) fn max_line_size_many<R: CubeRuntime>(
+pub(crate) fn max_vector_size_many<R: CubeRuntime>(
     tensors: &[&CubeTensor<R>],
     axis: usize,
-) -> LineSize {
+) -> VectorSize {
     let vec = tensors
         .iter()
         .map(|tensor| {
-            tensor_line_size_parallel(
-                tensor.client.io_optimized_line_sizes(tensor.dtype.size()),
+            tensor_vector_size_parallel(
+                tensor.client.io_optimized_vector_sizes(tensor.dtype.size()),
                 tensor.meta.shape(),
                 tensor.meta.strides(),
                 axis,
@@ -427,6 +517,10 @@ pub fn unfold<R: CubeRuntime>(
 
     CubeTensor {
         meta: Box::new(Metadata::new(shape, strides)),
-        ..tensor
+        client: tensor.client.clone(),
+        handle: tensor.handle.clone(),
+        device: tensor.device.clone(),
+        dtype: tensor.dtype,
+        qparams: tensor.qparams.clone(),
     }
 }

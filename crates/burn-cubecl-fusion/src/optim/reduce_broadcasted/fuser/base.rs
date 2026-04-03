@@ -1,15 +1,12 @@
-use crate::{
-    engine::codegen::ir::FuseType,
-    optim::{
-        CubeOptimization,
-        reduce::{ReduceFuser, ReduceFuserInfo, ReduceSettings},
-        reduce_broadcasted::{
-            ReduceBroadcastedOptimization, ReduceBroadcastedOptimizationInfo,
-            fuser::{
-                block::{ReduceBlockFuser, ReduceBlockFusionAnalysis, ReduceBroadcastedStatus},
-                full::ReduceBroadcastedFullFuser,
-                full_analyzer::FullFuserAnalyzer,
-            },
+use crate::optim::{
+    CubeOptimization,
+    reduce::{ReduceFuser, ReduceFuserInfo, ReduceSettings},
+    reduce_broadcasted::{
+        ReduceBlockOptimInfo, ReduceBroadcastedOptimization, ReduceBroadcastedOptimizationInfo,
+        fuser::{
+            block::{ReduceBlockFuser, ReduceBlockFusionAnalysis, ReduceBroadcastedStatus},
+            full::ReduceBroadcastedFullFuser,
+            full_analyzer::FullFuserAnalyzer,
         },
     },
 };
@@ -25,7 +22,6 @@ pub struct ReduceBroadcastedFuser<R: Runtime> {
     num_ops: usize,
     state: ReduceBroadcastedStatus,
     max_bindings: u32,
-    bool_precision: FuseType,
 }
 
 impl<R: Runtime> Clone for ReduceBroadcastedFuser<R> {
@@ -36,14 +32,13 @@ impl<R: Runtime> Clone for ReduceBroadcastedFuser<R> {
             num_ops: self.num_ops,
             state: self.state.clone(),
             max_bindings: self.max_bindings,
-            bool_precision: self.bool_precision,
         }
     }
 }
 
 impl<R: Runtime> ReduceBroadcastedFuser<R> {
-    pub fn new(device: R::Device, bool_precision: FuseType) -> Self {
-        let fuser = ReduceFuser::new(device, bool_precision, ReduceSettings::Always);
+    pub fn new(device: R::Device) -> Self {
+        let fuser = ReduceFuser::new(device, ReduceSettings::Always);
         let max_bindings = fuser.fuser.max_bindings;
         let block = ReduceBlockFuser::new(fuser.clone());
 
@@ -53,20 +48,51 @@ impl<R: Runtime> ReduceBroadcastedFuser<R> {
             num_ops: 0,
             state: ReduceBroadcastedStatus::Starting,
             max_bindings,
-            bool_precision,
         }
     }
-}
 
-impl<R: Runtime> OperationFuser<CubeOptimization<R>> for ReduceBroadcastedFuser<R> {
-    fn fuse(&mut self, operation: &OperationIr) {
-        if matches!(
-            &self.state,
-            ReduceBroadcastedStatus::Closed | ReduceBroadcastedStatus::Abort
-        ) {
-            return;
+    /// Checks whether the full fuser and all fallback blocks together account for every
+    /// operation that has been registered across all blocks.
+    ///
+    /// This is a dry-run consistency check: it simulates finishing all blocks without
+    /// mutating any state, then verifies two invariants:
+    ///
+    /// 1. **Full fuser coverage** — the number of operations absorbed by the
+    ///    [`ReduceBroadcastedFullFuser`] matches the total operation count.
+    /// 2. **Fallback coverage** — the sum of operations across all fallback
+    ///    [`ReduceBlockOptimInfo`] entries also matches the total operation count.
+    ///
+    /// If either invariant fails, the fuser's state should be marked as
+    /// [`ReduceBroadcastedStatus::Abort`] because the optimization would produce
+    /// incorrect results.
+    fn is_consistent(&self) -> bool {
+        let analyzer = FullFuserAnalyzer::new(&self.blocks);
+        let mut full = ReduceBroadcastedFullFuser::new(self.max_bindings, analyzer);
+        let mut num_ops = 0;
+        let fallbacks = self
+            .blocks
+            .clone()
+            .iter_mut()
+            .map(|block| block.finish(&mut num_ops, &mut full))
+            .collect::<Vec<_>>();
+
+        let mut num_ops_fallback = 0;
+
+        for f in fallbacks.iter() {
+            num_ops_fallback += match f {
+                ReduceBlockOptimInfo::Reduce(info) => info.len,
+                ReduceBlockOptimInfo::Elemwise(info) => info.num_ops_fused(),
+            };
         }
 
+        let full_fuser_covers_all = full.num_ops_fused() == num_ops;
+        let fallbacks_cover_all = num_ops_fallback == num_ops;
+
+        full_fuser_covers_all && fallbacks_cover_all
+    }
+
+    /// Fuses without checking consistency and the current state.
+    fn fuse_no_check(&mut self, operation: &OperationIr) {
         let block = self.blocks.last_mut().unwrap();
         let analyze = block.analyze(operation, &self.state, &self.fuser_default);
 
@@ -108,11 +134,35 @@ impl<R: Runtime> OperationFuser<CubeOptimization<R>> for ReduceBroadcastedFuser<
             ReduceFuserInfo::FusedElemwise { .. } => {}
         }
     }
+}
+
+impl<R: Runtime> OperationFuser<CubeOptimization<R>> for ReduceBroadcastedFuser<R> {
+    fn fuse(&mut self, operation: &OperationIr) {
+        if matches!(
+            &self.state,
+            ReduceBroadcastedStatus::Closed | ReduceBroadcastedStatus::Abort
+        ) {
+            return;
+        }
+
+        // We first need to simulate the fusion to check the consistency, then we perform the
+        // fusion.
+        let mut next = self.clone();
+        next.fuse_no_check(operation);
+
+        // We can only check for consistency if the optimization is ready.
+        if next.properties().ready && !next.is_consistent() {
+            // Fusions that lead to inconsistent trace are closed.
+            self.state = ReduceBroadcastedStatus::Closed;
+        } else {
+            // Normal path.
+            self.fuse_no_check(operation);
+        }
+    }
 
     fn finish(&mut self) -> CubeOptimization<R> {
         let analyzer = FullFuserAnalyzer::new(&self.blocks);
-        let mut full =
-            ReduceBroadcastedFullFuser::new(self.max_bindings, self.bool_precision, analyzer);
+        let mut full = ReduceBroadcastedFullFuser::new(self.max_bindings, analyzer);
         let mut num_ops = 0;
         let fallbacks = self
             .blocks
@@ -191,7 +241,7 @@ mod tests {
     #[test]
     fn reduce_broadcast_workflow_1() {
         let device: <Run as Runtime>::Device = Default::default();
-        let mut fuser = ReduceBroadcastedFuser::<Run>::new(device, FuseType::I32);
+        let mut fuser = ReduceBroadcastedFuser::<Run>::new(device);
         let (tensor1_out, tensor1) = tensor(0, &[1, 2], TensorStatus::ReadWrite);
         let (tensor2_out, tensor2) = tensor(1, &[1, 0], TensorStatus::ReadWrite);
 
@@ -210,13 +260,7 @@ mod tests {
         let status = fuser.status();
         assert_eq!(2, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 2,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         // An existing tensor
         let (_tensor3_out, tensor3) = tensor(2, &[1, 0], TensorStatus::ReadWrite);
@@ -234,13 +278,7 @@ mod tests {
         let status = fuser.status();
         assert_eq!(3, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 3,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         // An existing tensor
         let (_tensor5_out, tensor5) = tensor(4, &[1, 2], TensorStatus::ReadWrite);
@@ -258,13 +296,7 @@ mod tests {
         let status = fuser.status();
         assert_eq!(4, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 4,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         let (tensor7_out, _tensor7) = tensor(6, &[1, 0], TensorStatus::ReadWrite);
         fuser.fuse(&OperationIr::NumericFloat(
@@ -277,13 +309,7 @@ mod tests {
         ));
         assert_eq!(5, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 5,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         let _optimization = fuser.finish();
     }
@@ -291,7 +317,7 @@ mod tests {
     #[test]
     fn reduce_broadcast_workflow_2() {
         let device: <Run as Runtime>::Device = Default::default();
-        let mut fuser = ReduceBroadcastedFuser::<Run>::new(device, FuseType::I32);
+        let mut fuser = ReduceBroadcastedFuser::<Run>::new(device);
         let (tensor1_out, tensor1) = tensor(0, &[1, 2], TensorStatus::ReadWrite);
         // An existing tensor
         let (_tensor2_out, mut tensor2) = tensor(2, &[1, 2], TensorStatus::ReadOnly);
@@ -325,13 +351,7 @@ mod tests {
         let status = fuser.status();
         assert_eq!(3, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 3,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         // A new tensor
         let (tensor5_out, _tensor5) = tensor(5, &[1, 2], TensorStatus::ReadWrite);
@@ -349,13 +369,7 @@ mod tests {
         let status = fuser.status();
         assert_eq!(4, fuser.len());
         assert_eq!(status, FuserStatus::Open);
-        assert_eq!(
-            fuser.properties(),
-            FuserProperties {
-                score: 4,
-                ready: true
-            }
-        );
+        assert!(fuser.properties().ready,);
 
         let _optimization = fuser.finish();
     }

@@ -5,10 +5,8 @@ use cubek::{
         AcceleratedTileKind, ConvolutionArgs, ReadingStrategy, Strategy, backward_weight,
         components::ConvSetupError,
     },
-    matmul::{
-        definition::{MatmulElems, MatmulGlobalElems},
-        launch::MatmulInputHandleRef,
-    },
+    matmul::definition::{MatmulElems, MatmulGlobalElems},
+    std::InputBinding,
 };
 
 use crate::{CubeRuntime, ops::numeric::empty_device_dtype, tensor::CubeTensor};
@@ -111,15 +109,17 @@ pub fn launch_backwards_weight<R: CubeRuntime, const N: usize>(
         rhs: out_grad.dtype.into(),
         out: out_dtype.into(),
     });
-    let input = MatmulInputHandleRef::new(input.as_handle_ref(), input.dtype.into());
-    let out_grad = MatmulInputHandleRef::new(out_grad.as_handle_ref(), out_grad.dtype.into());
+    let input_dtype = input.dtype;
+    let out_grad_dtype = out_grad.dtype;
+    let input = InputBinding::new(input.binding(), input_dtype.into());
+    let out_grad = InputBinding::new(out_grad.binding(), out_grad_dtype.into());
 
     backward_weight::launch_ref::<R, N>(
         strategy,
         &client,
-        &input,
-        &out_grad,
-        &weight_grad.as_handle_ref(),
+        input,
+        out_grad,
+        weight_grad.clone().binding(),
         ConvolutionArgs {
             stride: options.stride,
             padding: options.padding,

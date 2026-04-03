@@ -25,6 +25,7 @@ pub mod network;
 
 // Re-exported types
 pub use cubecl_common::bytes::*;
+pub use cubecl_common::device_handle::DeviceHandle;
 pub use cubecl_common::*;
 pub use half::{bf16, f16};
 
@@ -55,7 +56,11 @@ mod cube {
                 DType::U32 => ElemType::UInt(UIntKind::U32),
                 DType::U16 => ElemType::UInt(UIntKind::U16),
                 DType::U8 => ElemType::UInt(UIntKind::U8),
-                DType::Bool => ElemType::Bool,
+                DType::Bool(store) => match store {
+                    crate::BoolStore::Native => ElemType::Bool,
+                    crate::BoolStore::U8 => ElemType::UInt(UIntKind::U8),
+                    crate::BoolStore::U32 => ElemType::UInt(UIntKind::U32),
+                },
                 DType::QFloat(scheme) => match scheme.store {
                     QuantStore::Native => match scheme.value {
                         QuantValue::Q8F | QuantValue::Q8S => Self::Int(IntKind::I8),

@@ -61,8 +61,10 @@ fn scatter_kernel<T: Numeric, I: Int, Op: BinaryOpFamily>(
 
         let input_idx = (stride_input * index) + offset_input;
 
-        let value =
-            Op::BinaryOp::<T>::execute(Line::cast_from(input[input_idx]), Line::cast_from(value));
+        let value = Op::BinaryOp::<T, Const<1>>::execute(
+            Vector::cast_from(input[input_idx]),
+            Vector::cast_from(value),
+        );
         input[input_idx] = value[0];
     }
 }
@@ -90,20 +92,21 @@ pub(crate) fn scatter<R: CubeRuntime>(
         false => scatter_kernel::launch_unchecked::<AddOp, R>,
     };
 
+    let (tensor_dtype, indices_dtype) = (tensor.dtype, indices.dtype);
+
     unsafe {
         launch(
-            &indices.client.clone(),
+            &tensor.client.clone(),
             cube_count,
             cube_dim,
             address_type!(tensor, indices, value),
-            tensor.as_tensor_arg(1),
-            indices.as_tensor_arg(1),
-            value.as_tensor_arg(1),
+            tensor.clone().into_tensor_arg(),
+            indices.into_tensor_arg(),
+            value.into_tensor_arg(),
             shape_divmod(&tensor),
             dim,
-            [tensor.dtype.into(), indices.dtype.into()],
+            [tensor_dtype.into(), indices_dtype.into()],
         )
-        .expect("Kernel to never fail");
     }
     tensor
 }

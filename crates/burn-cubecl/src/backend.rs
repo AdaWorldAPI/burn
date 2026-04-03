@@ -50,7 +50,7 @@ where
         cubek::random::seed(seed);
     }
 
-    fn ad_enabled() -> bool {
+    fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
 
@@ -61,13 +61,17 @@ where
         })
     }
 
-    fn memory_persistent_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
     ) -> Output {
         let client = R::client(device);
-        client.memory_persistent_allocation(input, func)
+        client.memory_persistent_allocation(input, func).unwrap()
     }
 
     fn memory_cleanup(device: &Self::Device) {
@@ -116,11 +120,18 @@ where
         let has_mma = |cfg: &MmaConfig| {
             cfg.a_type == storage || cfg.b_type == storage || cfg.cd_type == storage
         };
-        if props.features.cmma.iter().any(has_mma) || props.features.mma.iter().any(has_mma) {
+        if props.features.matmul.cmma.iter().any(has_mma)
+            || props.features.matmul.mma.iter().any(has_mma)
+        {
             out |= DTypeUsage::Accelerated;
         }
 
         out
+    }
+
+    fn device_count(type_id: u16) -> usize {
+        let client = R::client(&Default::default());
+        client.device_count(type_id)
     }
 }
 

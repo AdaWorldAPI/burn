@@ -1,10 +1,12 @@
 //! This module declares input-output primitives to read and write values during kernel expansion.
-use super::{DYN_ELEM_ID, ir::*, tensor::GlobalTensor};
+use crate::engine::codegen::{DynElem, DynSize};
+
+use super::{ir::*, tensor::GlobalTensor};
 use burn_std::quantization::QuantScheme;
 use cubecl::quant::scheme::QuantLevel;
 use cubecl::{
     intrinsic,
-    ir::{ExpandElement, Variable},
+    ir::{ManagedVariable, Variable},
     prelude::*,
     std::{FastDivmod, tensor::View},
 };
@@ -35,55 +37,55 @@ pub enum Transform {
 /// This is because the [argument](FuseArg) might point to a global input, output or local variable
 /// created during kernel expansion.
 #[cube]
-pub fn read<C: CubePrimitive>(
+pub fn read<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     outputs: &GlobalArgs,
     locals: &LocalArgs,
     ref_pos: usize,
     #[comptime] arg: FuseArg,
     #[comptime] config: &FuseBlockConfig,
-) -> Line<C> {
+) -> Vector<C, N> {
+    set_polyfill_typed::<Vector<C, N>, DynElem, DynSize>();
     match arg {
         FuseArg::Input(pos, _precision, layout) => {
             let global = inputs.tensors.index(pos);
-            let line_size = global.tensor.line_size();
+            let vector_size = global.tensor.vector_size();
 
-            if comptime![!global.broadcasted && line_size != config.width] {
+            if comptime![!global.broadcasted && vector_size != config.width] {
                 read_input_aligned(inputs, locals, pos, ref_pos, layout, config, None)
             } else {
                 read_input(inputs, locals, pos, ref_pos, layout, config, None)
             }
         }
         FuseArg::MultiBlockLocal(key, _) | FuseArg::MultiBlockGlobal(key, _) => {
-            Line::cast_from(outputs.variables.read(key))
+            Vector::cast_from(outputs.variables.read(key))
         }
         FuseArg::Output(pos, _precision, layout) => {
             read_output(inputs, outputs, locals, pos, ref_pos, layout, config)
         }
         FuseArg::BlockLocal { pos, ty } => match comptime![ty] {
-            FuseType::F64 => Line::cast_from(locals.l_f64.find(pos)),
-            FuseType::F32 | FuseType::Flex32 => Line::cast_from(locals.l_f32.find(pos)),
-            FuseType::F16 => Line::cast_from(locals.l_f16.find(pos)),
-            FuseType::BF16 => Line::cast_from(locals.l_bf16.find(pos)),
-            FuseType::U64 => Line::cast_from(locals.l_u64.find(pos)),
-            FuseType::U32 => Line::cast_from(locals.l_u32.find(pos)),
-            FuseType::U16 => Line::cast_from(locals.l_u16.find(pos)),
-            FuseType::U8 => Line::cast_from(locals.l_u8.find(pos)),
-            FuseType::I64 => Line::cast_from(locals.l_i64.find(pos)),
-            FuseType::I32 => Line::cast_from(locals.l_i32.find(pos)),
-            FuseType::I16 => Line::cast_from(locals.l_i16.find(pos)),
-            FuseType::I8 => Line::cast_from(locals.l_i8.find(pos)),
-            FuseType::Bool => Line::cast_from(locals.l_bool.find(pos)),
+            FuseType::F64 => Vector::cast_from(locals.l_f64.find(pos)),
+            FuseType::F32 | FuseType::Flex32 => Vector::cast_from(locals.l_f32.find(pos)),
+            FuseType::F16 => Vector::cast_from(locals.l_f16.find(pos)),
+            FuseType::BF16 => Vector::cast_from(locals.l_bf16.find(pos)),
+            FuseType::U64 => Vector::cast_from(locals.l_u64.find(pos)),
+            FuseType::U32 => Vector::cast_from(locals.l_u32.find(pos)),
+            FuseType::U16 => Vector::cast_from(locals.l_u16.find(pos)),
+            FuseType::U8 => Vector::cast_from(locals.l_u8.find(pos)),
+            FuseType::I64 => Vector::cast_from(locals.l_i64.find(pos)),
+            FuseType::I32 => Vector::cast_from(locals.l_i32.find(pos)),
+            FuseType::I16 => Vector::cast_from(locals.l_i16.find(pos)),
+            FuseType::I8 => Vector::cast_from(locals.l_i8.find(pos)),
         },
         FuseArg::Scalar(..) => {
             let scalar = read_scalar::<C>(inputs, arg);
-            Line::new(scalar)
+            Vector::new(scalar)
         }
         FuseArg::ScalarShape(_) => {
             let scalar = read_scalar_shape(inputs, arg);
-            Line::cast_from(scalar)
+            Vector::cast_from(scalar)
         }
-        FuseArg::Literal(val, _precision) => Line::new(from_const_int::<C>(val)),
+        FuseArg::Literal(val, _precision) => Vector::new(from_const_int::<C>(val)),
         FuseArg::InputReshaped {
             original,
             shape,
@@ -91,9 +93,9 @@ pub fn read<C: CubePrimitive>(
         } => match comptime![original.as_ref().clone()] {
             FuseArg::Input(pos, _precision, layout) => {
                 let global = inputs.tensors.index(pos);
-                let line_size = global.tensor.line_size();
+                let vector_size = global.tensor.vector_size();
 
-                if comptime![!broadcasted && line_size != config.width] {
+                if comptime![!broadcasted && vector_size != config.width] {
                     read_input_aligned(
                         inputs,
                         locals,
@@ -124,9 +126,9 @@ pub fn read<C: CubePrimitive>(
         } => match comptime![original.as_ref().clone()] {
             FuseArg::Input(pos, _precision, layout) => {
                 let global = inputs.tensors.index(pos);
-                let line_size = global.tensor.line_size();
+                let vector_size = global.tensor.vector_size();
 
-                if comptime![!broadcasted && line_size != config.width] {
+                if comptime![!broadcasted && vector_size != config.width] {
                     read_input_aligned(
                         inputs,
                         locals,
@@ -168,7 +170,7 @@ fn index_offset_with_quant_layout(
     let (start, end) = (0, rank - 1);
     let num_quants = scheme.num_quants();
 
-    let offset_ref = index * locals.ref_line_size;
+    let offset_ref = index * locals.ref_vector_size;
     let mut offset = 0;
 
     #[unroll]
@@ -183,31 +185,32 @@ fn index_offset_with_quant_layout(
     let stride_last = tensor.tensor.stride(end);
     offset += (ogwl.div_ceil(num_quants)) % shape_last * stride_last;
 
-    offset / tensor.tensor.line_size()
+    offset / tensor.tensor.vector_size()
 }
 
 /// Reads a global quantized tensor at the given position.
 ///
 /// # Notes
 ///
-/// The values returned in the [Line] are not dequantized.
+/// The values returned in the [Vector] are not dequantized.
 #[cube]
-pub fn read_quantized<C: CubePrimitive>(
+pub fn read_quantized<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     locals: &LocalArgs,
     ref_pos: usize,
     #[comptime] arg: FuseArg,
     #[comptime] config: &FuseBlockConfig,
     #[comptime] scheme: QuantScheme,
-) -> Line<C> {
+) -> Vector<C, N> {
     match arg {
         FuseArg::Input(pos, _precision, _layout) => {
+            set_polyfill_typed::<Vector<C, N>, DynElem, DynSize>();
             let global = inputs.tensors.index(pos);
 
             let offset =
                 index_offset_with_quant_layout(global, locals, ref_pos, config.rank, scheme);
             let val = global.tensor[offset];
-            Line::cast_from(val)
+            Vector::cast_from(val)
         }
         _ => panic!("Not supported"),
     }
@@ -215,7 +218,7 @@ pub fn read_quantized<C: CubePrimitive>(
 
 /// Reads a global scalar.
 #[cube]
-pub fn read_scalar<C: CubePrimitive>(inputs: &GlobalArgs, #[comptime] arg: FuseArg) -> C {
+pub fn read_scalar<C: Scalar>(inputs: &GlobalArgs, #[comptime] arg: FuseArg) -> C {
     match arg {
         FuseArg::Scalar(pos, _precision) => {
             let scalar = inputs.scalars.index(pos);
@@ -236,7 +239,7 @@ pub fn read_scalar_shape(inputs: &GlobalArgs, #[comptime] arg: FuseArg) -> usize
 
 /// Reads an input tensor.
 #[cube]
-pub fn read_input<C: CubePrimitive>(
+pub fn read_input<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     locals: &LocalArgs,
     #[comptime] pos: usize,
@@ -244,14 +247,15 @@ pub fn read_input<C: CubePrimitive>(
     #[comptime] layout: LayoutInfo,
     #[comptime] config: &FuseBlockConfig,
     #[comptime] transform: Option<Transform>,
-) -> Line<C> {
+) -> Vector<C, N> {
+    set_polyfill_typed::<Vector<C, N>, DynElem, DynSize>();
     let tensor = inputs.tensors.index(pos);
     let offset = match layout {
         LayoutInfo::SameAsRef => ref_pos,
         LayoutInfo::IsRef => ref_pos,
         LayoutInfo::Unknown => get_offset(inputs, locals, tensor, ref_pos, None, config, transform),
     };
-    Line::cast_from(tensor.tensor[offset])
+    Vector::cast_from(tensor.tensor[offset])
 }
 
 /// Returns a slice of data in the asked precision of the input tensor at the given position.
@@ -262,6 +266,7 @@ pub fn read_input_window<C: CubePrimitive>(
     start: usize,
     end: usize,
 ) -> Slice<C> {
+    set_polyfill_typed::<C, DynElem, DynSize>();
     let tensor = inputs.tensors.index(pos);
     let slice = tensor.tensor.slice(start, end);
     slice.downcast()
@@ -270,6 +275,7 @@ pub fn read_input_window<C: CubePrimitive>(
 /// Returns the input as a slice.
 #[cube]
 pub fn input_as_slice<C: CubePrimitive>(inputs: &GlobalArgs, #[comptime] pos: usize) -> Slice<C> {
+    set_polyfill_typed::<C, DynElem, DynSize>();
     let tensor = inputs.tensors.index(pos);
     let slice = tensor.tensor.to_slice();
     slice.downcast()
@@ -277,14 +283,14 @@ pub fn input_as_slice<C: CubePrimitive>(inputs: &GlobalArgs, #[comptime] pos: us
 
 /// Returns the input tensor as a quantized scale view.
 #[cube]
-pub fn input_as_scales_view<C: CubePrimitive>(
+pub fn input_as_scales_view<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     #[comptime] pos: usize,
     #[comptime] tensor_pos: usize,
     #[comptime] level: QuantLevel,
     #[comptime] config: &FuseBlockConfig,
 ) -> View<C, usize> {
-    set_polyfill_typed::<C, NumericExpand<DYN_ELEM_ID>>();
+    set_polyfill_typed::<Vector<C, N>, DynElem, DynSize>();
     let tensor = inputs.tensors.index(tensor_pos);
     let scales = inputs.tensors.index(pos);
     let tensor_len = tensor.tensor.len();
@@ -300,13 +306,13 @@ pub fn input_as_scales_view<C: CubePrimitive>(
                 tensor_shape.push(FastDivmod::new_Fallback(tensor.tensor.shape(i)));
                 scales_strides.push(scales.tensor.stride(i));
             }
-            let line_size = scales.tensor.line_size();
+            let vector_size = scales.tensor.vector_size();
             let layout = BlockScaledLayout::new(
                 tensor_shape,
                 tensor_len,
                 scales_strides,
                 block_size,
-                line_size,
+                vector_size,
             );
             ScalesLayout::new_BlockScaled(layout)
         }
@@ -316,7 +322,7 @@ pub fn input_as_scales_view<C: CubePrimitive>(
 
 /// Reads the input tensor aligned.
 #[cube]
-pub fn read_input_aligned<C: CubePrimitive>(
+pub fn read_input_aligned<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     locals: &LocalArgs,
     #[comptime] pos: usize,
@@ -324,8 +330,8 @@ pub fn read_input_aligned<C: CubePrimitive>(
     #[comptime] layout: LayoutInfo,
     #[comptime] config: &FuseBlockConfig,
     #[comptime] transform: Option<Transform>,
-) -> Line<C> {
-    let mut result: Line<C> = Line::<C>::empty(config.width);
+) -> Vector<C, N> {
+    let mut result = Vector::<C, N>::empty();
     let tensor = inputs.tensors.index(pos);
 
     match transform.clone() {
@@ -387,7 +393,7 @@ pub fn get_offset_aligned(
 ) -> usize {
     match layout {
         LayoutInfo::SameAsRef | LayoutInfo::IsRef => {
-            (ref_pos * locals.ref_line_size) / tensor.tensor.line_size()
+            (ref_pos * locals.ref_vector_size) / tensor.tensor.vector_size()
         }
         LayoutInfo::Unknown => get_offset(
             inputs,
@@ -403,7 +409,7 @@ pub fn get_offset_aligned(
 
 /// Reads an output tensor.
 #[cube]
-pub fn read_output<C: CubePrimitive>(
+pub fn read_output<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     outputs: &GlobalArgs,
     locals: &LocalArgs,
@@ -411,72 +417,137 @@ pub fn read_output<C: CubePrimitive>(
     ref_pos: usize,
     #[comptime] layout: LayoutInfo,
     #[comptime] config: &FuseBlockConfig,
-) -> Line<C> {
+) -> Vector<C, N> {
     let tensor = outputs.tensors.index(pos);
     let offset = match layout {
         LayoutInfo::SameAsRef => ref_pos,
         LayoutInfo::IsRef => ref_pos,
         LayoutInfo::Unknown => get_offset(inputs, locals, tensor, ref_pos, None, config, None),
     };
-    Line::cast_from(tensor.tensor[offset])
+    Vector::cast_from(tensor.tensor[offset])
 }
 
 #[cube]
 /// Write the given value at the [arg](Arg) position.
-pub fn write<C: CubePrimitive>(
+pub fn write<C: Scalar, N: Size>(
     inputs: &GlobalArgs,
     outputs: &mut GlobalArgs,
     locals: &mut LocalArgs,
     ref_pos: usize,
-    value: Line<C>,
+    value: Vector<C, N>,
     #[comptime] arg: FuseArg,
     #[comptime] config: &FuseBlockConfig,
 ) {
-    match arg {
-        FuseArg::Output(pos, precision, layout) => {
-            let tensor = outputs.tensors.index(pos);
-            let offset = match layout {
-                LayoutInfo::SameAsRef => ref_pos,
-                LayoutInfo::IsRef => ref_pos,
-                LayoutInfo::Unknown => {
-                    get_offset(inputs, locals, tensor, ref_pos, None, config, None)
-                }
-            };
-            let tensor = outputs.tensors.index_mut(pos);
-            set_polyfill::<NumericExpand<DYN_ELEM_ID>>(comptime![precision.into_type()]);
+    set_polyfill_typed::<Vector<C, N>, DynElem, DynSize>();
 
-            tensor.tensor[offset] = Line::cast_from(value);
+    match arg {
+        FuseArg::Output(pos, _, layout) => {
+            let tensor = outputs.tensors.index(pos);
+            let output_vs = tensor.tensor.vector_size();
+            if comptime![output_vs != config.width] {
+                // Output tensor has a different vector_size than the computation width.
+                // Write element-by-element to avoid SPIR-V type mismatch.
+                write_output_aligned(inputs, outputs, locals, pos, ref_pos, value, layout, config);
+            } else {
+                // Vector sizes match - set polyfill to output type and write directly.
+                set_polyfill::<DynElem, DynSize>(comptime![tensor.ty]);
+                let offset = match layout {
+                    LayoutInfo::SameAsRef => ref_pos,
+                    LayoutInfo::IsRef => ref_pos,
+                    LayoutInfo::Unknown => {
+                        get_offset(inputs, locals, tensor, ref_pos, None, config, None)
+                    }
+                };
+                let tensor = outputs.tensors.index_mut(pos);
+
+                let value = Vector::cast_from(value);
+
+                tensor.tensor[offset] = value;
+            }
         }
-        FuseArg::BlockLocal { .. } => write_scalar::<C>(locals, value, arg),
+        FuseArg::BlockLocal { .. } => write_scalar::<C, N>(locals, value, arg),
         FuseArg::MultiBlockLocal(key, _) | FuseArg::MultiBlockGlobal(key, _) => {
-            outputs.variables.write(key, Line::cast_from(value))
+            outputs.variables.write(key, Vector::cast_from(value))
         }
         _ => comptime![panic!("Can't write into inputs and scalars")],
     }
 }
 
+/// Writes a [Vector] value element-by-element to an output tensor whose vector_size
+/// differs from the computation width. Mirrors [read_input_aligned] for the write path.
+#[cube]
+fn write_output_aligned<C: Scalar, N: Size>(
+    inputs: &GlobalArgs,
+    outputs: &mut GlobalArgs,
+    locals: &LocalArgs,
+    #[comptime] pos: usize,
+    ref_pos: usize,
+    value: Vector<C, N>,
+    #[comptime] layout: LayoutInfo,
+    #[comptime] config: &FuseBlockConfig,
+) {
+    let tensor = outputs.tensors.index(pos);
+    set_polyfill::<DynElem, DynSize>(comptime![tensor.ty]);
+
+    match layout {
+        LayoutInfo::SameAsRef | LayoutInfo::IsRef => {
+            let offset = (ref_pos * config.width) / tensor.tensor.vector_size();
+            let output = outputs.tensors.index_mut(pos);
+            let stride = output.tensor.stride(config.rank - 1);
+
+            #[unroll]
+            for i in 0..config.width {
+                let idx = offset + i * stride;
+                output.tensor[idx] = Vector::cast_from(value[i]);
+            }
+        }
+        LayoutInfo::Unknown => {
+            // When layout differs from ref, each of the config.width elements may map
+            // to a different offset in the output (or to the same offset when the output
+            // has broadcast dimensions). Compute each element's offset individually to
+            // avoid cross-contamination of neighboring elements.
+            let base_flat = ref_pos * config.width;
+
+            #[unroll]
+            for i in 0..config.width {
+                let tensor_ro = outputs.tensors.index(pos);
+                let offset = index_offset_with_layout(
+                    inputs,
+                    tensor_ro,
+                    locals,
+                    base_flat + i,
+                    None,
+                    config.rank,
+                    None,
+                );
+                let output = outputs.tensors.index_mut(pos);
+                output.tensor[offset] = Vector::cast_from(value[i]);
+            }
+        }
+    }
+}
+
 #[cube]
 /// Write the given value at the [arg](Arg) position.
-pub fn write_scalar<C: CubePrimitive>(
+pub fn write_scalar<C: Scalar, N: Size>(
     locals: &mut LocalArgs,
-    value: Line<C>,
+    value: Vector<C, N>,
     #[comptime] arg: FuseArg,
 ) {
     match arg {
         FuseArg::BlockLocal { pos, ty } => match comptime![ty] {
-            FuseType::F64 => locals.l_f64.insert(pos, Line::cast_from(value)),
-            FuseType::F32 | FuseType::Flex32 => locals.l_f32.insert(pos, Line::cast_from(value)),
-            FuseType::F16 => locals.l_f16.insert(pos, Line::cast_from(value)),
-            FuseType::BF16 => locals.l_bf16.insert(pos, Line::cast_from(value)),
-            FuseType::U64 => locals.l_u64.insert(pos, Line::cast_from(value)),
-            FuseType::U32 => locals.l_u32.insert(pos, Line::cast_from(value)),
-            FuseType::U16 => locals.l_u16.insert(pos, Line::cast_from(value)),
-            FuseType::U8 => locals.l_u8.insert(pos, Line::cast_from(value)),
-            FuseType::I64 => locals.l_i64.insert(pos, Line::cast_from(value)),
-            FuseType::I32 => locals.l_i32.insert(pos, Line::cast_from(value)),
-            FuseType::I16 => locals.l_i16.insert(pos, Line::cast_from(value)),
-            FuseType::I8 => locals.l_i8.insert(pos, Line::cast_from(value)),
-            FuseType::Bool => locals.l_bool.insert(pos, Line::cast_from(value)),
+            FuseType::F64 => locals.l_f64.insert(pos, Vector::cast_from(value)),
+            FuseType::F32 | FuseType::Flex32 => locals.l_f32.insert(pos, Vector::cast_from(value)),
+            FuseType::F16 => locals.l_f16.insert(pos, Vector::cast_from(value)),
+            FuseType::BF16 => locals.l_bf16.insert(pos, Vector::cast_from(value)),
+            FuseType::U64 => locals.l_u64.insert(pos, Vector::cast_from(value)),
+            FuseType::U32 => locals.l_u32.insert(pos, Vector::cast_from(value)),
+            FuseType::U16 => locals.l_u16.insert(pos, Vector::cast_from(value)),
+            FuseType::U8 => locals.l_u8.insert(pos, Vector::cast_from(value)),
+            FuseType::I64 => locals.l_i64.insert(pos, Vector::cast_from(value)),
+            FuseType::I32 => locals.l_i32.insert(pos, Vector::cast_from(value)),
+            FuseType::I16 => locals.l_i16.insert(pos, Vector::cast_from(value)),
+            FuseType::I8 => locals.l_i8.insert(pos, Vector::cast_from(value)),
         },
         _ => comptime![panic!("Can't write into something else than scalars")],
     }
@@ -515,11 +586,12 @@ fn get_offset(
     #[comptime] config: &FuseBlockConfig,
     #[comptime] transform: Option<Transform>,
 ) -> usize {
+    let offset_ref = ref_pos * locals.ref_vector_size;
     index_offset_with_layout(
         inputs,
         tensor,
         locals,
-        ref_pos,
+        offset_ref,
         range,
         config.rank,
         transform,
@@ -527,10 +599,13 @@ fn get_offset(
 }
 
 #[cube]
-/// Gets the line size for a global tensor.
-pub fn global_line_size(global: &GlobalArgs, #[comptime] pos: usize) -> comptime_type!(LineSize) {
+/// Gets the vector size for a global tensor.
+pub fn global_vector_size(
+    global: &GlobalArgs,
+    #[comptime] pos: usize,
+) -> comptime_type!(VectorSize) {
     let tensor = global.tensors.index(pos);
-    tensor.tensor.line_size()
+    tensor.tensor.vector_size()
 }
 
 #[cube]
@@ -622,9 +697,9 @@ pub fn ref_stride(locals: &LocalArgs, axis: usize) -> usize {
 }
 
 #[cube]
-/// Gets the reference line size.
-pub fn ref_line_size(locals: &LocalArgs) -> comptime_type!(LineSize) {
-    comptime![locals.ref_line_size]
+/// Gets the reference vector size.
+pub fn ref_vector_size(locals: &LocalArgs) -> comptime_type!(VectorSize) {
+    comptime![locals.ref_vector_size]
 }
 
 #[cube]
@@ -646,7 +721,7 @@ fn index_offset_with_layout(
     inputs: &GlobalArgs,
     tensor: &GlobalTensor,
     locals: &LocalArgs,
-    index: usize,
+    offset_ref: usize,
     #[comptime] range: Option<(usize, usize)>,
     #[comptime] rank: usize,
     #[comptime] transform: Option<Transform>,
@@ -658,8 +733,7 @@ fn index_offset_with_layout(
                 "Can't get a range on a reshaped tensor."
             )];
 
-            let index = index * locals.ref_line_size;
-            let index = reshaped_index(inputs, locals, index, rank, shape);
+            let index = reshaped_index(inputs, locals, offset_ref, rank, shape);
             reshaped_index_to_original_index(&tensor.tensor, index, rank)
         }
         Some(Transform::SwapDims(dim1, dim2)) => {
@@ -668,7 +742,6 @@ fn index_offset_with_layout(
                 None => (0, rank),
             }};
 
-            let offset_ref = index * locals.ref_line_size;
             let mut offset = 0;
 
             #[unroll]
@@ -678,7 +751,7 @@ fn index_offset_with_layout(
                 offset += ogwl % tensor.tensor.shape(index) * tensor.tensor.stride(index);
             }
 
-            offset / tensor.tensor.line_size()
+            offset / tensor.tensor.vector_size()
         }
         None => {
             let (start, end) = comptime! {match range {
@@ -686,7 +759,6 @@ fn index_offset_with_layout(
                 None => (0, rank),
             }};
 
-            let offset_ref = index * locals.ref_line_size;
             let mut offset = 0;
 
             #[unroll]
@@ -695,7 +767,7 @@ fn index_offset_with_layout(
                 offset += ogwl % tensor.tensor.shape(i) * tensor.tensor.stride(i);
             }
 
-            offset / tensor.tensor.line_size()
+            offset / tensor.tensor.vector_size()
         }
     }
 }
@@ -741,8 +813,8 @@ fn reshaped_index(
 #[allow(unreachable_code)]
 #[cube]
 #[allow(clippy::clone_on_copy)]
-fn reshaped_index_to_original_index<C: CubePrimitive>(
-    original: &Tensor<Line<C>>,
+fn reshaped_index_to_original_index<C: Scalar, N: Size>(
+    original: &Tensor<Vector<C, N>>,
     index_reshaped: usize,
     #[comptime] rank: usize,
 ) -> usize {
@@ -761,7 +833,7 @@ fn reshaped_index_to_original_index<C: CubePrimitive>(
         offset += coordinate * stride;
     }
 
-    offset / original.line_size()
+    offset / original.vector_size()
 }
 
 #[cube]
@@ -778,15 +850,15 @@ pub(crate) fn reverse_index(
 #[cube]
 fn from_const_int<C: CubePrimitive>(#[comptime] value: usize) -> C {
     intrinsic!(|scope| {
-        ExpandElement::Plain(Variable::constant(value.into(), C::as_type(scope))).into()
+        ManagedVariable::Plain(Variable::constant(value.into(), C::as_type(scope))).into()
     })
 }
 
 #[cube]
 #[allow(clippy::extra_unused_type_parameters)]
-fn set_polyfill_typed<C: CubePrimitive, Dyn: CubePrimitive>() {
+pub(crate) fn set_polyfill_typed<C: CubePrimitive, Dyn: Scalar, DynSize: Size>() {
     intrinsic!(|scope| {
         let elem_type = C::as_type(scope);
-        set_polyfill::expand::<Dyn>(scope, elem_type);
+        set_polyfill::expand::<Dyn, DynSize>(scope, elem_type);
     })
 }

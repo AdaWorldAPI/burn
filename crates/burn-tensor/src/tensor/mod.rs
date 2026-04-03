@@ -6,7 +6,8 @@ pub use api::*;
 
 // Re-exported types
 pub use burn_backend::{
-    DType, DataError, FloatDType, IntDType, TensorData, TensorMetadata, TensorPrimitive, Tolerance,
+    BoolDType, BoolStore, DType, DataError, FloatDType, IntDType, TensorData, TensorMetadata,
+    TensorPrimitive, Tolerance,
     distribution::*,
     element::*,
     indexing::*,
@@ -41,6 +42,9 @@ pub mod loss;
 /// The neural network module.
 pub mod module;
 
+/// The signal processing module.
+pub mod signal;
+
 /// Operations on tensors module.
 pub mod ops {
     pub use burn_backend::backend::ops::*;
@@ -57,11 +61,5 @@ pub use report::*;
 
 #[cfg(feature = "std")]
 mod report;
-
-#[cfg(feature = "experimental-named-tensor")]
-mod named;
-
-#[cfg(feature = "experimental-named-tensor")]
-pub use named::*;
 
 pub use ops::Device; // Re-export device so that it's available from `burn_tensor::Device`.

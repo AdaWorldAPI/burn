@@ -1,14 +1,11 @@
 use burn_fusion::stream::Context;
-use burn_std::{DType, Strides, quantization::QParamTensor, strides};
+use burn_std::{DType, Shape, Strides, quantization::QParamTensor, strides};
+use cubecl::quant::scheme::{QuantParam, QuantScheme};
 use cubecl::{
-    CubeElement, Runtime,
+    Runtime,
     client::ComputeClient,
-    ir::{AddressType, ElemType},
-    prelude::{TensorArg, TensorHandleRef},
-};
-use cubecl::{
-    ir::LineSize,
-    quant::scheme::{QuantParam, QuantScheme},
+    ir::AddressType,
+    prelude::{TensorArg, TensorBinding},
 };
 use std::marker::PhantomData;
 
@@ -66,13 +63,12 @@ unsafe impl<R: Runtime> Sync for CubeFusionHandle<R> {}
 
 impl<R: Runtime> CubeFusionHandle<R> {
     /// Return the reference to a tensor handle.
-    pub fn as_handle_ref<'a>(&'a self, shape: &'a [usize]) -> TensorHandleRef<'a, R> {
-        TensorHandleRef {
-            handle: &self.handle,
-            strides: &self.strides,
+    pub fn binding(self, shape: Shape) -> TensorBinding<R> {
+        TensorBinding {
+            handle: self.handle.binding(),
+            strides: self.strides.clone(),
             shape,
             runtime: PhantomData,
-            elem_size: self.dtype.size(),
         }
     }
 
@@ -87,23 +83,11 @@ impl<R: Runtime> CubeFusionHandle<R> {
     }
 
     /// Return the reference to a tensor argument.
-    pub fn as_tensor_arg<'a>(
-        &'a self,
-        shape: &'a [usize],
-        line_size: LineSize,
-    ) -> TensorArg<'a, R> {
-        let handle: TensorHandleRef<'a, R> = self.as_handle_ref(shape);
-
-        unsafe {
-            TensorArg::from_raw_parts_and_size(
-                handle.handle,
-                handle.strides,
-                handle.shape,
-                line_size,
-                self.dtype.size(),
-            )
-        }
+    pub fn into_tensor_arg(self, shape: Shape) -> TensorArg<R> {
+        let handle = self.binding(shape);
+        handle.into_tensor_arg()
     }
+
     /// Construct a separate tensor for the quantization scales, if present
     pub fn params(&self, scheme: QuantScheme) -> Option<Self> {
         let qparams = self.qparams.as_ref()?;
@@ -137,29 +121,4 @@ pub(crate) fn strides_dyn_rank(shape: &[usize]) -> Strides {
     });
 
     strides
-}
-
-pub(crate) fn elem_dtype<E: CubeElement>() -> DType {
-    match E::cube_type().elem_type() {
-        ElemType::Float(kind) => match kind {
-            cubecl::ir::FloatKind::F64 => DType::F64,
-            cubecl::ir::FloatKind::F16 => DType::F16,
-            cubecl::ir::FloatKind::BF16 => DType::BF16,
-            cubecl::ir::FloatKind::F32 => DType::F32,
-            _ => todo!(),
-        },
-        ElemType::Int(kind) => match kind {
-            cubecl::ir::IntKind::I64 => DType::I64,
-            cubecl::ir::IntKind::I32 => DType::I32,
-            cubecl::ir::IntKind::I16 => DType::I16,
-            cubecl::ir::IntKind::I8 => DType::I8,
-        },
-        ElemType::UInt(kind) => match kind {
-            cubecl::ir::UIntKind::U64 => DType::U64,
-            cubecl::ir::UIntKind::U32 => DType::U32,
-            cubecl::ir::UIntKind::U16 => DType::U16,
-            cubecl::ir::UIntKind::U8 => DType::U8,
-        },
-        ElemType::Bool => DType::Bool,
-    }
 }

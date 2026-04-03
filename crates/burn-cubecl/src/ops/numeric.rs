@@ -1,6 +1,6 @@
 use crate::{
     CubeRuntime,
-    kernel::utils::{address_type, linear_view, shape_divmod},
+    kernel::utils::{address_type, shape_divmod},
 };
 use crate::{element::CubeElement, tensor::CubeTensor};
 use crate::{
@@ -8,14 +8,14 @@ use crate::{
         AddOp, BitwiseAndOp, BitwiseOrOp, BitwiseXorOp, DivOp, MulOp, PowOp, RemainderOp, SubOp,
         launch_binop, launch_binop_int, launch_scalar_binop, launch_scalar_binop_int,
     },
-    ops::max_line_size,
+    ops::max_vector_size,
 };
 use burn_backend::{DType, Shape, TensorMetadata};
 use burn_std::Metadata;
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
-use cubecl::{client::ComputeClient, server::Allocation};
+use cubecl::{client::ComputeClient, server::MemoryLayout};
 use cubecl::{
-    server::AllocationDescriptor,
+    server::MemoryLayoutDescriptor,
     std::{FastDivmod, tensor::layout::linear::LinearView},
 };
 
@@ -52,8 +52,8 @@ pub fn full_device_dtype<R: CubeRuntime>(
     let empty = empty_device_dtype(client, device, shape, dtype);
 
     #[cube(launch_unchecked, address_type = "dynamic")]
-    pub fn full_kernel<C: Numeric>(
-        tensor: &mut LinearView<C, ReadWrite>,
+    pub fn full_kernel<C: Numeric, N: Size>(
+        tensor: &mut LinearView<Vector<C, N>, ReadWrite>,
         value: InputScalar,
         #[define(C)] _dtype: StorageType,
     ) {
@@ -61,13 +61,13 @@ pub fn full_device_dtype<R: CubeRuntime>(
             terminate!();
         }
 
-        tensor[ABSOLUTE_POS] = value.get::<C>();
+        tensor[ABSOLUTE_POS] = Vector::new(value.get::<C>());
     }
 
     let num_elems = empty.meta.num_elements();
-    let line_size = max_line_size(&empty);
+    let vector_size = max_vector_size(&empty);
 
-    let working_units = num_elems / line_size as usize;
+    let working_units = num_elems / vector_size as usize;
     let cube_dim = CubeDim::new(&empty.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&empty.client, working_units, cube_dim);
 
@@ -77,11 +77,11 @@ pub fn full_device_dtype<R: CubeRuntime>(
             cube_count,
             cube_dim,
             address_type!(empty),
-            linear_view(&empty, line_size),
+            vector_size,
+            empty.clone().into_linear_view(),
             value,
             empty.dtype.into(),
-        )
-        .expect("Kernel to never fail");
+        );
     }
 
     empty
@@ -125,11 +125,11 @@ pub fn empty_device<R: CubeRuntime, E: CubeElement>(
     device: R::Device,
     shape: Shape,
 ) -> CubeTensor<R> {
-    let Allocation { handle, strides } = client.empty_tensor(&shape, size_of::<E>());
+    let MemoryLayout { memory, strides } = client.empty_tensor(shape.clone(), size_of::<E>());
 
     CubeTensor::new(
         client,
-        handle,
+        memory,
         Metadata::new(shape, strides),
         device,
         E::dtype(),
@@ -143,9 +143,9 @@ pub fn empty_device_dtype<R: CubeRuntime>(
     shape: Shape,
     dtype: DType,
 ) -> CubeTensor<R> {
-    let Allocation { handle, strides } = client.empty_tensor(&shape, dtype.size());
+    let MemoryLayout { memory, strides } = client.empty_tensor(shape.clone(), dtype.size());
 
-    CubeTensor::new(client, handle, Metadata::new(shape, strides), device, dtype)
+    CubeTensor::new(client, memory, Metadata::new(shape, strides), device, dtype)
 }
 
 /// Create a contiguous tensor with uninitialized memory
@@ -155,10 +155,10 @@ pub fn empty_device_contiguous_dtype<R: CubeRuntime>(
     shape: Shape,
     dtype: DType,
 ) -> CubeTensor<R> {
-    let descriptor = AllocationDescriptor::contiguous(&shape, dtype.size());
-    let Allocation { handle, strides } = client.empty_tensors(vec![descriptor]).remove(0);
+    let descriptor = MemoryLayoutDescriptor::contiguous(shape.clone(), dtype.size());
+    let MemoryLayout { memory, strides } = client.empty_tensors(vec![descriptor]).remove(0);
 
-    CubeTensor::new(client, handle, Metadata::new(shape, strides), device, dtype)
+    CubeTensor::new(client, memory, Metadata::new(shape, strides), device, dtype)
 }
 
 /// Add two tensors
@@ -292,7 +292,7 @@ impl<N: Numeric> CumulativeOp<N> for SumOp {
     }
 
     fn init_value(_first_element: N) -> N {
-        N::from_int(0)
+        N::zero()
     }
 }
 
@@ -422,6 +422,7 @@ fn cumulative_op<R: CubeRuntime, O: CumulativeOpFamily>(
     let working_units = num_elems;
     let cube_dim = CubeDim::new(&client, working_units);
     let cube_count = calculate_cube_count_elemwise(&client, working_units, cube_dim);
+    let shape = shape_divmod(&input);
 
     unsafe {
         cumulative_kernel::launch_unchecked::<O, R>(
@@ -429,13 +430,12 @@ fn cumulative_op<R: CubeRuntime, O: CumulativeOpFamily>(
             cube_count,
             cube_dim,
             address_type!(input, output),
-            input.as_tensor_arg(1),
-            linear_view(&output, 1),
-            shape_divmod(&input),
+            input.into_tensor_arg(),
+            output.clone().into_linear_view(),
+            shape,
             dim,
             output.dtype.into(),
-        )
-        .expect("Kernel to never fail");
+        );
     }
 
     output

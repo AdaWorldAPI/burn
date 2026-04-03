@@ -2,7 +2,7 @@ use super::{HandleInput, HandleOutput, LaunchPlan, ReferenceSelection};
 use crate::engine::launch::runner::TraceRunner;
 use crate::engine::trace::{FuseResources, TensorView, TraceError, TuneOutput, block::FuseBlock};
 use crate::{
-    CubeFusionHandle, elem_dtype,
+    CubeFusionHandle,
     engine::{
         codegen::ir::{
             FuseBlockConfig, FuseOp, FuseType, GlobalArgsLaunch, RefLayout, VirtualLayout,
@@ -12,12 +12,11 @@ use crate::{
 };
 use burn_fusion::stream::{Context, ScalarId};
 use burn_ir::ScalarIr;
-use burn_std::DType;
 use cubecl::{
-    CubeElement, Runtime,
+    Runtime,
     client::ComputeClient,
-    ir::AddressType,
-    prelude::{InputScalar, ScalarArg, TensorArg},
+    ir::{AddressType, Type},
+    prelude::{InputScalar, TensorArg},
 };
 use std::marker::PhantomData;
 
@@ -44,7 +43,7 @@ impl<'a, R: Runtime> LaunchPlanExecutor<'a, R> {
         }
     }
 
-    pub fn execute<Runner: TraceRunner<R>, BT: CubeElement>(
+    pub fn execute<Runner: TraceRunner<R>>(
         self,
         client: &ComputeClient<R>,
         runner: &Runner,
@@ -74,21 +73,21 @@ impl<'a, R: Runtime> LaunchPlanExecutor<'a, R> {
         let mut inputs = GlobalArgsLaunch::default();
         let mut outputs = GlobalArgsLaunch::default();
 
-        register_inputs(&plan.handle_inputs, &mut inputs);
+        register_inputs(plan.handle_inputs.clone(), &mut inputs);
         register_scalars(
             self.resources.scalars.iter(),
             self.resources.views.iter(),
             context,
             &mut inputs,
         );
-        register_outputs::<BT, R>(&plan.handle_outputs, &mut outputs, &mut tune_output);
+        register_outputs::<R>(plan.handle_outputs.clone(), &mut outputs, &mut tune_output);
 
         for layout in plan.runtime_layouts {
             for s in layout.shape.iter() {
-                inputs.runtime_layouts.push(ScalarArg::new(*s));
+                inputs.runtime_layouts.push(*s);
             }
             for s in layout.strides.iter() {
-                inputs.runtime_layouts.push(ScalarArg::new(*s));
+                inputs.runtime_layouts.push(*s);
             }
         }
 
@@ -106,7 +105,7 @@ impl<'a, R: Runtime> LaunchPlanExecutor<'a, R> {
                 ReferenceSelection::Reshaped { reshape_pos } => {
                     RefLayout::Virtual(VirtualLayout::Reshaped {
                         reshape_pos,
-                        line_size: block_plan.width,
+                        vector_size: block_plan.width,
                     })
                 }
                 ReferenceSelection::Runtime { pos } => {
@@ -160,59 +159,68 @@ impl<'a, R: Runtime> LaunchPlanExecutor<'a, R> {
     }
 }
 
-fn register_inputs<'h, R: Runtime>(
-    handle_inputs: &'h [HandleInput<R>],
-    inputs: &mut GlobalArgsLaunch<'h, R>,
+fn register_inputs<R: Runtime>(
+    handle_inputs: Vec<HandleInput<R>>,
+    inputs: &mut GlobalArgsLaunch<R>,
 ) {
-    for hi in handle_inputs.iter() {
+    for hi in handle_inputs {
         match hi {
             HandleInput::Normal(hi) => {
-                let arg = hi.handle.as_tensor_arg(&hi.global_ir.shape, hi.line_size);
+                let at = hi.handle.required_address_type();
+                let arg = hi.handle.into_tensor_arg(hi.global_ir.shape.clone());
                 inputs.tensors.push(GlobalTensorArg::new(
                     arg,
-                    hi.precision.into_elem(),
+                    hi.precision.into_type(hi.vector_size),
                     hi.broadcated,
-                    hi.handle.required_address_type(),
+                    at,
                 ));
             }
             HandleInput::QuantValues(hi) => {
-                let arg = hi.handle.as_tensor_arg(&hi.global_ir.shape, hi.line_size);
+                let at = hi.handle.required_address_type();
+                let arg = hi.handle.into_tensor_arg(hi.global_ir.shape.clone());
                 inputs.tensors.push(GlobalTensorArg::new(
                     arg,
-                    hi.precision.into_elem(),
+                    hi.precision.into_type(hi.vector_size),
                     false,
-                    hi.handle.required_address_type(),
+                    at,
                 ));
             }
             HandleInput::QuantParams(hi) => {
-                let arg = hi.handle.as_tensor_arg(&hi.shape, 1);
+                let at = hi.handle.required_address_type();
+                let arg = hi.handle.into_tensor_arg(hi.shape.clone());
                 inputs.tensors.push(GlobalTensorArg::new(
                     arg,
-                    hi.precision.into_elem(),
+                    hi.precision.into_type(1),
                     false,
-                    hi.handle.required_address_type(),
+                    at,
                 ));
             }
         }
     }
 }
 
-fn register_outputs<'s, BT: CubeElement, R: Runtime>(
-    handle_outputs: &'s [HandleOutput<R>],
-    outputs: &mut GlobalArgsLaunch<'s, R>,
+fn register_outputs<R: Runtime>(
+    handle_outputs: Vec<HandleOutput<R>>,
+    outputs: &mut GlobalArgsLaunch<R>,
     #[allow(unused_variables)] tune_output: &mut TuneOutput<R>,
 ) {
-    for item in handle_outputs.iter() {
+    for item in handle_outputs {
         match item {
             HandleOutput::Alias {
                 input_pos,
                 precision,
+                global_shape,
+                strides,
                 #[cfg(feature = "autotune-checks")]
                 debug_info,
             } => {
                 outputs.tensors.push(GlobalTensorArg::new(
-                    TensorArg::alias(*input_pos),
-                    precision.into_elem(),
+                    TensorArg::Alias {
+                        input_pos,
+                        strides,
+                        shape: global_shape,
+                    },
+                    precision.into_type(1),
                     false,
                     AddressType::default(),
                 ));
@@ -229,33 +237,25 @@ fn register_outputs<'s, BT: CubeElement, R: Runtime>(
                 precision,
                 handle,
                 global_shape,
-                vectorization: line_size,
+                vectorization: vector_size,
                 #[cfg(feature = "autotune-checks")]
                 relative_id,
                 ..
             } => {
-                let arg = handle.as_tensor_arg(global_shape, *line_size);
+                let at = handle.required_address_type();
+                let arg = handle.into_tensor_arg(global_shape.clone());
 
-                let elem = match precision {
-                    FuseType::Bool => match elem_dtype::<BT>() {
-                        DType::U32 => FuseType::U32.into_elem(),
-                        DType::U8 => FuseType::U8.into_elem(),
-                        _ => todo!(),
-                    },
-                    _ => precision.into_elem(),
-                };
+                let elem = precision.into_elem();
+                let ty = Type::new(elem.into()).with_vector_size(vector_size);
 
                 #[cfg(feature = "autotune-checks")]
                 if let TuneOutput::Checked { handles, .. } = tune_output {
                     handles.insert(*relative_id, (global_shape.clone(), handle.clone()));
                 }
 
-                outputs.tensors.push(GlobalTensorArg::new(
-                    arg,
-                    elem,
-                    false,
-                    handle.required_address_type(),
-                ));
+                outputs
+                    .tensors
+                    .push(GlobalTensorArg::new(arg, ty, false, at));
             }
         }
     }
@@ -265,10 +265,10 @@ fn register_scalars<'h, R: Runtime>(
     scalars: impl Iterator<Item = &'h (FuseType, u64)>,
     views: impl DoubleEndedIterator<Item = &'h TensorView>,
     context: &mut Context<'_, CubeFusionHandle<R>>,
-    inputs: &mut GlobalArgsLaunch<'h, R>,
+    inputs: &mut GlobalArgsLaunch<R>,
 ) {
     for (precision, id) in scalars {
-        let dtype = precision.into_type();
+        let dtype = precision.into_storage_type();
         match context.scalars.get(&ScalarId { value: *id }) {
             Some(scalar) => match scalar {
                 ScalarIr::Float(val) => inputs.scalars.push(InputScalar::new(*val, dtype)),
@@ -285,7 +285,7 @@ fn register_scalars<'h, R: Runtime>(
             let global = context.tensors.get(reshaped).unwrap();
 
             for shape in global.shape.iter() {
-                inputs.reshapes.push(ScalarArg::new(*shape));
+                inputs.reshapes.push(*shape);
             }
         }
     }

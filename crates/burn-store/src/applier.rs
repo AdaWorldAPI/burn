@@ -227,17 +227,17 @@ impl<B: Backend> Applier<B> {
         };
 
         // Validate shape
-        if data.shape != *target_shape {
+        if data.shape != target_shape {
             self.errors.push(ApplyError::ShapeMismatch {
                 path: path.clone(),
-                expected: target_shape.to_vec(),
-                found: data.shape.clone(),
+                expected: target_shape,
+                found: data.shape,
             });
             return None; // Signal caller to fall back to initialization
         }
 
         self.applied.push(path);
-        Some(Tensor::from_data_dtype(data, target_device, snapshot.dtype))
+        Some(Tensor::from_data(data, (target_device, snapshot.dtype)))
     }
 }
 
@@ -395,11 +395,9 @@ mod tests {
     /// Test that the applier preserves dtype when loading tensor data.
     /// This is a regression test for the bug where F16 tensors were being
     /// loaded as F32 because `Tensor::from_data` was used instead of
-    /// `Tensor::from_data_dtype`.
+    /// without specifying the target dtype
     #[test]
     fn dtype_preservation_f64() {
-        // Use NdArray<f64> backend to properly test F64 dtype preservation
-        type TestBackendF64 = burn_ndarray::NdArray<f64>;
         let device = Default::default();
 
         // Create TensorData with F64 dtype explicitly
@@ -420,12 +418,12 @@ mod tests {
         );
 
         // Create applier with the F64 snapshot
-        let mut applier = Applier::<TestBackendF64>::new(vec![snapshot], None, None, false);
+        let mut applier = Applier::<TestBackend>::new(vec![snapshot], None, None, false);
 
         // Create target parameter
         let target = Param::initialized(
             ParamId::new(),
-            Tensor::<TestBackendF64, 2>::zeros([2, 2], &device),
+            Tensor::<TestBackend, 2>::zeros([2, 2], (&device, DType::F64)),
         );
 
         // Apply the snapshot
@@ -549,7 +547,7 @@ mod tests {
 
         // Note: To fully test F16 tensor creation, you would need a backend
         // that supports F16 (like CUDA or WebGPU). The applier fix ensures
-        // that `Tensor::from_data_dtype(data, device, snapshot.dtype)` is
+        // that `Tensor::from_data(data, (device, snapshot.dtype))` is
         // called with DType::F16, which will correctly create an F16 tensor
         // on backends that support it.
     }

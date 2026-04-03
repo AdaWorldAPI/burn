@@ -7,11 +7,16 @@ use crate::{
 };
 use burn_backend::{DType, TensorMetadata};
 use burn_std::Metadata;
-use cubecl::{AutotuneKey, client::ComputeClient, features::TypeUsage, ir::StorageType};
+use cubecl::{
+    AutotuneKey,
+    client::ComputeClient,
+    features::AtomicUsage,
+    ir::{StorageType, Type},
+};
 use cubek::reduce::{
     ReduceDtypes, ReduceError, ReduceStrategy,
     components::instructions::ReduceOperationConfig,
-    launch::{LineSizeStrategy, RoutineStrategy},
+    launch::{RoutineStrategy, VectorizationStrategy},
     routines::{BlueprintStrategy, unit::UnitStrategy},
     shared_sum,
 };
@@ -31,8 +36,8 @@ pub struct SumAutotuneKey {
 fn supports_atomic_add<R: CubeRuntime>(client: &ComputeClient<R>, dtype: DType) -> bool {
     client
         .properties()
-        .type_usage(StorageType::Atomic(dtype.into()))
-        .contains(TypeUsage::AtomicAdd)
+        .atomic_type_usage(Type::new(StorageType::Atomic(dtype.into())))
+        .contains(AtomicUsage::Add)
 }
 
 /// [Sum](sum) with fallback when `client` doesn't support atomic add for the type `E`.
@@ -65,12 +70,14 @@ pub fn sum<Run: CubeRuntime>(
     match strategy {
         SumStrategy::OneShot(cube_count) => {
             let output = zeros_client(client.clone(), device, [1].into(), tensor.dtype);
+            let dtype = tensor.dtype;
+
             shared_sum::<Run>(
                 &client,
-                tensor.as_handle_ref(),
-                output.as_handle_ref(),
+                tensor.binding(),
+                output.clone().binding(),
                 cube_count,
-                tensor.dtype.into(),
+                dtype.into(),
             )?;
 
             Ok(output)
@@ -169,12 +176,12 @@ pub fn reduce_dim<Run: CubeRuntime>(
     let result = match strategy {
         KernelReduceStrategy::Unspecified => cubek::reduce::reduce::<Run>(
             &client,
-            input.as_handle_ref(),
-            output.as_handle_ref(),
+            input.binding(),
+            output.clone().binding(),
             dim,
             ReduceStrategy {
                 routine: RoutineStrategy::Unit(BlueprintStrategy::Inferred(UnitStrategy)),
-                line_size: LineSizeStrategy {
+                vectorization: VectorizationStrategy {
                     parallel_output_vectorization: false,
                 },
             },
@@ -183,8 +190,8 @@ pub fn reduce_dim<Run: CubeRuntime>(
         ),
         KernelReduceStrategy::Specific(strategy) => cubek::reduce::reduce::<Run>(
             &client,
-            input.as_handle_ref(),
-            output.as_handle_ref(),
+            input.binding(),
+            output.clone().binding(),
             dim,
             strategy,
             config,

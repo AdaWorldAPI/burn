@@ -6,6 +6,7 @@ use burn_backend::{
         DeformConvOptions, InterpolateMode, InterpolateOptions, MaxPool1dWithIndices,
         MaxPool2dBackward, MaxPool2dWithIndices, ModuleOps, attention::attention_fallback,
     },
+    tensor::FloatTensor,
 };
 
 impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
@@ -402,6 +403,9 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
             InterpolateMode::Bicubic => {
                 tch::Tensor::upsample_bicubic2d(&x.tensor, output_size, align_corners, None, None)
             }
+            InterpolateMode::Lanczos3 => {
+                panic!("lanczos3 interpolation is not supported by PyTorch/tch backend")
+            }
         };
 
         TchTensor::new(tensor)
@@ -442,6 +446,9 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
                 None,
                 None,
             ),
+            InterpolateMode::Lanczos3 => {
+                panic!("lanczos3 interpolation backward is not supported by PyTorch/tch backend")
+            }
         };
 
         TchTensor::new(tensor)
@@ -469,5 +476,17 @@ impl<E: TchElement> ModuleOps<Self> for LibTorch<E> {
             options.scale,
             false,
         ))
+    }
+
+    fn rfft(_signal: FloatTensor<Self>, _dim: usize) -> (FloatTensor<Self>, FloatTensor<Self>) {
+        todo!("rfft is not supported for now in LibTorch")
+    }
+
+    fn irfft(
+        _spectrum_re: FloatTensor<Self>,
+        _spectrum_im: FloatTensor<Self>,
+        _dim: usize,
+    ) -> FloatTensor<Self> {
+        todo!("irfft is not supported for now in LibTorch")
     }
 }

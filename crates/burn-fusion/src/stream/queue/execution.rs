@@ -1,12 +1,10 @@
-use std::sync::Arc;
-
 use burn_ir::{HandleContainer, TensorStatus};
 
 use crate::{
-    FusionRuntime,
+    FusionRuntime, UnfusedOp,
     search::BlockOptimization,
     stream::{
-        Context, Operation, OperationConverter, OrderedExecution, RelativeOps,
+        Context, OperationConverter, OrderedExecution, RelativeOps,
         store::{ExecutionPlanId, ExecutionPlanStore, ExecutionStrategy},
     },
 };
@@ -32,6 +30,7 @@ impl<R: FusionRuntime> OperationQueue<R> {
     ) {
         let mut operations = Vec::new();
         core::mem::swap(&mut operations, &mut self.operations);
+
         let (operations, num_drained) =
             QueueExecution::run(step, &mut self.converter, handles, operations);
 
@@ -86,8 +85,8 @@ impl<'a, R: FusionRuntime> QueueExecution<'a, R> {
         optimization: &mut BlockOptimization<R::Optimization>,
         converter: &'a mut OperationConverter,
         handles: &'a mut HandleContainer<R::FusionHandle>,
-        operations: Vec<Arc<dyn Operation<R>>>,
-    ) -> (Vec<Arc<dyn Operation<R>>>, usize) {
+        operations: Vec<UnfusedOp<R>>,
+    ) -> (Vec<UnfusedOp<R>>, usize) {
         let execution = OrderedExecution::new(operations);
 
         if matches!(&optimization.strategy, ExecutionStrategy::Composed(..)) {

@@ -5,7 +5,9 @@ use crate::{
 };
 use burn_backend::ops::AttentionModuleOptions;
 use cubecl::tune::{LocalTuner, Tunable, TunableSet, TuneGroup, local_tuner};
-use cubek::attention::{definition::AttentionSetupError, launch::AttentionAutotuneKey};
+use cubek::attention::{
+    launch::AttentionAutotuneKey, routines::blackbox_accelerated::BlackboxAcceleratedStrategy,
+};
 
 /// Executes autotune on attention operations
 pub fn attention_autotune<R: CubeRuntime>(
@@ -15,8 +17,7 @@ pub fn attention_autotune<R: CubeRuntime>(
     mask: Option<CubeTensor<R>>,
     attn_bias: Option<CubeTensor<R>>,
     options: AttentionModuleOptions,
-    out: CubeTensor<R>,
-) -> Result<CubeTensor<R>, AttentionSetupError> {
+) -> CubeTensor<R> {
     let client = query.client.clone();
 
     static TUNER: LocalTuner<AttentionAutotuneKey, CubeTuneId> = local_tuner!();
@@ -27,35 +28,40 @@ pub fn attention_autotune<R: CubeRuntime>(
 
         let flash_attention =
             TuneGroup::<AttentionAutotuneKey>::new("flash_attention", |_key| PRIORITY_MAX);
-        let fallback = TuneGroup::<AttentionAutotuneKey>::new("fallback", |_key| PRIORITY_MIN);
+
+        let fallback = TuneGroup::<AttentionAutotuneKey>::new("fallback", |key| {
+            if key.seq_q > 4096 {
+                PRIORITY_MIN
+            } else {
+                PRIORITY_MAX
+            }
+        });
 
         let mut set = TunableSet::new(create_key::<R>, input_gen::<R>);
 
         // First entry should always work, since it is considered the fallback.
         set = set.with(
-            Tunable::new(
-                "fallback",
-                |query, key, value, mask, attn_bias, out, options| {
-                    attention::<R>(
-                        query,
-                        key,
-                        value,
-                        mask,
-                        attn_bias,
-                        options,
-                        &AttentionStrategy::Fallback,
-                        Some(out),
-                    )
-                    .map_err(|err| std::format!("{err:?}"))
-                },
-            )
+            Tunable::new("fallback", |query, key, value, mask, attn_bias, options| {
+                attention::<R>(
+                    query,
+                    key,
+                    value,
+                    mask,
+                    attn_bias,
+                    options,
+                    AttentionStrategy::Fallback,
+                )
+                .map_err(|err| std::format!("{err:?}"))
+            })
             .group(&fallback, |_key| PRIORITY_MAX),
         );
 
-        set = set.with(
-            Tunable::new(
-                "blackbox_accelerated",
-                |query, key, value, mask, attn_bias, out, options| {
+        let seq_q = 1;
+        let seq_kv = 1;
+        for num_planes in [2, 4, 8] {
+            let name = format!("blackbox_accelerated_{num_planes}_planes_p_{seq_q}-{seq_kv}");
+            set = set.with(
+                Tunable::new(&name, move |query, key, value, mask, attn_bias, options| {
                     attention::<R>(
                         query,
                         key,
@@ -63,32 +69,31 @@ pub fn attention_autotune<R: CubeRuntime>(
                         mask,
                         attn_bias,
                         options,
-                        &AttentionStrategy::FlashBlackboxAccelerated,
-                        Some(out),
+                        AttentionStrategy::FlashBlackboxAccelerated(BlackboxAcceleratedStrategy {
+                            num_planes,
+                            seq_q,
+                            seq_kv,
+                        }),
                     )
                     .map_err(|err| std::format!("{err:?}"))
-                },
-            )
-            .group(&flash_attention, |_key| PRIORITY_MAX),
-        );
+                })
+                .group(&flash_attention, |_key| PRIORITY_MAX),
+            );
+        }
 
         set = set.with(
-            Tunable::new(
-                "unit",
-                |query, key, value, mask, attn_bias, out, options| {
-                    attention::<R>(
-                        query,
-                        key,
-                        value,
-                        mask,
-                        attn_bias,
-                        options,
-                        &AttentionStrategy::FlashUnit,
-                        Some(out),
-                    )
-                    .map_err(|err| std::format!("{err:?}"))
-                },
-            )
+            Tunable::new("unit", |query, key, value, mask, attn_bias, options| {
+                attention::<R>(
+                    query,
+                    key,
+                    value,
+                    mask,
+                    attn_bias,
+                    options,
+                    AttentionStrategy::FlashUnit,
+                )
+                .map_err(|err| std::format!("{err:?}"))
+            })
             .group(&flash_attention, |_key| PRIORITY_MIN),
         );
 
@@ -99,19 +104,16 @@ pub fn attention_autotune<R: CubeRuntime>(
         &CubeTuneId::new(&client, &query.device),
         &client,
         tunables,
-        (query, key, value, mask, attn_bias, out.clone(), options),
-    );
-
-    Ok(out)
+        (query, key, value, mask, attn_bias, options),
+    )
 }
 
 fn create_key<R: CubeRuntime>(
     query: &CubeTensor<R>,
-    _key: &CubeTensor<R>,
+    key: &CubeTensor<R>,
     value: &CubeTensor<R>,
     mask: &Option<CubeTensor<R>>,
     _attn_bias: &Option<CubeTensor<R>>,
-    _out: &CubeTensor<R>,
     _options: &AttentionModuleOptions,
 ) -> AttentionAutotuneKey {
     let total_batches = query.meta.shape[0] * query.meta.shape[1];
@@ -121,6 +123,10 @@ fn create_key<R: CubeRuntime>(
     let val_dim = value.meta.shape[3];
 
     AttentionAutotuneKey::generate(
+        query.dtype.into(),
+        key.dtype.into(),
+        value.dtype.into(),
+        query.dtype.into(),
         total_batches,
         seq_q,
         head_dim,
@@ -139,7 +145,6 @@ fn input_gen<R: CubeRuntime>(
     value: &CubeTensor<R>,
     mask: &Option<CubeTensor<R>>,
     attn_bias: &Option<CubeTensor<R>>,
-    out: &CubeTensor<R>,
     options: &AttentionModuleOptions,
 ) -> (
     CubeTensor<R>,
@@ -147,7 +152,6 @@ fn input_gen<R: CubeRuntime>(
     CubeTensor<R>,
     Option<CubeTensor<R>>,
     Option<CubeTensor<R>>,
-    CubeTensor<R>,
     AttentionModuleOptions,
 ) {
     (
@@ -156,7 +160,6 @@ fn input_gen<R: CubeRuntime>(
         value.clone(),
         mask.clone(),
         attn_bias.clone(),
-        out.copy(),
         *options,
     )
 }

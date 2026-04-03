@@ -47,7 +47,7 @@ pub enum ReduceFuserInfo {
 }
 
 impl<R: Runtime> ReduceFuser<R> {
-    pub fn new(device: R::Device, bool_precision: FuseType, settings: ReduceSettings) -> Self {
+    pub fn new(device: R::Device, settings: ReduceSettings) -> Self {
         let client = R::client(&device);
         let props = client.properties();
         let max_bindings = props.hardware.max_bindings;
@@ -69,17 +69,9 @@ impl<R: Runtime> ReduceFuser<R> {
         let settings_fallback = FuseSettings::default();
 
         Self {
-            fuser: TraceOperationFuser::new(max_bindings, bool_precision, settings_read),
-            fuser_read_fallback: TraceOperationFuser::new(
-                max_bindings,
-                bool_precision,
-                settings_fallback,
-            ),
-            fuser_write_fallback: TraceOperationFuser::new(
-                max_bindings,
-                bool_precision,
-                settings_fallback,
-            ),
+            fuser: TraceOperationFuser::new(max_bindings, settings_read),
+            fuser_read_fallback: TraceOperationFuser::new(max_bindings, settings_fallback),
+            fuser_write_fallback: TraceOperationFuser::new(max_bindings, settings_fallback),
             settings_write,
             device,
             reduce: None,
@@ -104,6 +96,7 @@ impl<R: Runtime> ReduceFuser<R> {
             }
         }
     }
+
     fn on_reduce(&mut self, op: &ReduceDimOpIr, inst: ReduceInstruction) {
         // TODO: Fix: we need to have fuse-on-read with an identity block.
         //
@@ -127,7 +120,7 @@ impl<R: Runtime> ReduceFuser<R> {
         let fuse_on_write_activated = match self.settings {
             ReduceSettings::Always => true,
             // We only activate fuse-on-write when the reduction isn't on the last dimension, otherwise
-            // vectorization is impossible. Only [LineMode::Perpendicular] supports vectorization.
+            // vectorization is impossible. Only [VectorizationMode::Perpendicular] supports vectorization.
             //
             // We could still fuse some output operations, but it would probably lead to worse performance.
             ReduceSettings::OnlyParallel => axis != op.input.shape.rank() - 1,
@@ -307,14 +300,7 @@ impl<R: Runtime> OperationFuser<CubeOptimization<R>> for ReduceFuser<R> {
 
     fn properties(&self) -> burn_fusion::FuserProperties {
         let mut properties = self.fuser.properties();
-
-        if self.reduce.is_some() {
-            properties.ready = true;
-            properties.score += 1;
-        } else {
-            properties.ready = false;
-        };
-
+        properties.ready = self.reduce.is_some();
         properties
     }
 

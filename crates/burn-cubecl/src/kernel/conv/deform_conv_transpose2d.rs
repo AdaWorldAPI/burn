@@ -6,7 +6,7 @@ use crate::{
         matmul::{MatmulStrategy, matmul},
         reduce::reduce_dim,
         slice_assign,
-        utils::{address_type, decompose_linear, linear_view},
+        utils::{address_type, decompose_linear},
     },
     ops::{
         numeric::{empty_device_dtype, zeros_client},
@@ -17,13 +17,10 @@ use crate::{
 use burn_backend::{DType, Shape, TensorMetadata, ops::DeformConvOptions};
 use cubecl::{
     CubeDim, CubeLaunch, calculate_cube_count_elemwise, cube,
-    features::TypeUsage,
+    features::AtomicUsage,
     ir::FloatKind,
     prelude::*,
-    std::{
-        CubeOption, CubeOptionExpand, FastDivmod, FastDivmodArgs,
-        tensor::layout::linear::LinearView,
-    },
+    std::{FastDivmod, tensor::layout::linear::LinearView},
 };
 use cubek::{
     convolution::components::ConvSetupError,
@@ -84,7 +81,7 @@ pub(crate) fn deform_conv2d_backward<R: CubeRuntime>(
         )
         .unwrap();
 
-        reshape(grad, bias.meta.shape)
+        reshape(grad, bias.meta.shape.clone())
     });
 
     let input = into_contiguous_aligned(input);
@@ -239,10 +236,7 @@ fn compute_offset_and_mask_gradient<R: CubeRuntime>(
     let offset_groups = options.offset_groups;
 
     let pos_shape = [batches, offset_groups, kernel_h, kernel_w, 2, out_h, out_w];
-    let pos_shape = pos_shape
-        .into_iter()
-        .map(|s| FastDivmodArgs::new(&client, s))
-        .collect();
+    let pos_shape = pos_shape.into_iter().collect();
 
     let grad_offset =
         empty_device_dtype(client.clone(), device.clone(), offset.shape(), offset.dtype);
@@ -257,34 +251,34 @@ fn compute_offset_and_mask_gradient<R: CubeRuntime>(
     let dtype: StorageType = image.dtype.into();
     unsafe {
         deform_col2img_coord_kernel::launch_unchecked(
-            &image.client,
+            &grad_offset.client,
             cube_count,
             cube_dim,
             address_type!(image, offset, mask, grad_offset, grad_mask),
-            image.as_tensor_arg(1),
-            offset.as_tensor_arg(1),
-            mask.as_ref().map(|mask| mask.as_tensor_arg(1)).into(),
-            columns.as_tensor_arg(1),
-            linear_view(&grad_offset, 1),
+            image.into_tensor_arg(),
+            offset.into_tensor_arg(),
+            mask.map(|mask| mask.into_tensor_arg()).into(),
+            columns.into_tensor_arg(),
+            grad_offset.clone().into_linear_view(),
             grad_mask
-                .as_ref()
-                .map(|grad_mask| grad_mask.as_tensor_arg(1))
+                .clone()
+                .map(|grad_mask| grad_mask.into_tensor_arg())
                 .into(),
             pos_shape,
             DeformConv2dCol2ImgCoordArgsLaunch::new(
-                ScalarArg::new(options.stride[0]),
-                ScalarArg::new(options.stride[1]),
-                ScalarArg::new(options.dilation[0]),
-                ScalarArg::new(options.dilation[1]),
+                options.stride[0],
+                options.stride[1],
+                options.dilation[0],
+                options.dilation[1],
                 InputScalar::new(options.padding[0] as f32, dtype.elem_type()),
                 InputScalar::new(options.padding[1] as f32, dtype.elem_type()),
-                ScalarArg::new(offset_groups),
-                ScalarArg::new(kernel_h),
-                ScalarArg::new(kernel_w),
+                offset_groups,
+                kernel_h,
+                kernel_w,
             ),
             dtype,
         )
-    }?;
+    };
 
     Ok((grad_offset, grad_mask))
 }
@@ -302,14 +296,15 @@ struct DeformConv2dCol2ImgCoordArgs {
     kernel_width: usize,
 }
 
+#[allow(clippy::collapsible_if)]
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn deform_col2img_coord_kernel<F: Float>(
     image: &Tensor<F>,
     offset: &Tensor<F>,
-    mask: &CubeOption<Tensor<F>>,
+    mask: &ComptimeOption<Tensor<F>>,
     columns: &Tensor<F>,
     grad_offset: &mut LinearView<F, ReadWrite>,
-    grad_mask: &mut CubeOption<Tensor<F>>,
+    grad_mask: &mut ComptimeOption<Tensor<F>>,
     pos_shape: Sequence<FastDivmod<usize>>,
     args: &DeformConv2dCol2ImgCoordArgs,
     #[define(F)] _dtype: StorageType,
@@ -362,15 +357,16 @@ fn deform_col2img_coord_kernel<F: Float>(
     let offset_x = offset[offset_x_idx];
 
     let mask_pos_1 = offset_group * kernel_h * kernel_w + kernel_y * kernel_w + kernel_x;
+    #[comptime]
     let mask_value = match &mask {
-        CubeOption::Some(mask) => {
+        ComptimeOption::Some(mask) => {
             let mask_idx = batch * mask.stride(0)
                 + mask_pos_1 * mask.stride(1)
                 + out_y * mask.stride(2)
                 + out_x * mask.stride(3);
             mask[mask_idx]
         }
-        CubeOption::None => F::new(1.0),
+        ComptimeOption::None => F::new(1.0),
     };
 
     let is_y_direction = dir == 0;
@@ -401,18 +397,16 @@ fn deform_col2img_coord_kernel<F: Float>(
 
     grad_offset[ABSOLUTE_POS] = grad_offset_val;
 
-    match grad_mask {
-        CubeOption::Some(grad_mask) => {
-            if is_y_direction {
-                let idx = batch * grad_mask.stride(0)
-                    + mask_pos_1 * grad_mask.stride(1)
-                    + out_y * grad_mask.stride(2)
-                    + out_x * grad_mask.stride(3);
+    #[comptime]
+    if let ComptimeOption::Some(grad_mask) = grad_mask {
+        if is_y_direction {
+            let idx = batch * grad_mask.stride(0)
+                + mask_pos_1 * grad_mask.stride(1)
+                + out_y * grad_mask.stride(2)
+                + out_x * grad_mask.stride(3);
 
-                grad_mask[idx] = grad_mask_val
-            }
+            grad_mask[idx] = grad_mask_val
         }
-        CubeOption::None => {}
     }
 }
 
@@ -485,22 +479,19 @@ fn compute_input_grad<R: CubeRuntime>(
 
     let supports_fadd = client
         .properties()
-        .type_usage(StorageType::Atomic(FloatKind::F32.into()))
-        .contains(TypeUsage::AtomicAdd);
+        .atomic_type_usage(Type::new(StorageType::Atomic(FloatKind::F32.into())))
+        .contains(AtomicUsage::Add);
     let supports_same_type = client
         .properties()
-        .type_usage(StorageType::Atomic(columns.dtype.into()))
-        .contains(TypeUsage::AtomicAdd);
+        .atomic_type_usage(Type::new(StorageType::Atomic(columns.dtype.into())))
+        .contains(AtomicUsage::Add);
 
     let [batches, in_channels, height, width] = input_shape.dims();
     let [_, _, out_h, out_w] = offset.meta.shape().dims();
     let (kernel_h, kernel_w) = kernel_dims;
 
     let pos_shape = [in_channels, kernel_h, kernel_w, batches, out_h, out_w];
-    let pos_shape = pos_shape
-        .into_iter()
-        .map(|s| FastDivmodArgs::new(&client, s))
-        .collect();
+    let pos_shape = pos_shape.into_iter().collect();
 
     let shape = Shape::new([batches, in_channels, height, width]);
     let grad_in = match supports_fadd && supports_same_type {
@@ -509,7 +500,7 @@ fn compute_input_grad<R: CubeRuntime>(
         // Force `f32` to enable bitcasting as `u32`, or use intrinsic when supported
         false => zeros_client(client.clone(), device.clone(), shape, DType::F32),
     };
-    let grad_arg = grad_in.as_tensor_arg(1);
+    let grad_arg = grad_in.clone().into_tensor_arg();
 
     let num_elements = columns.meta.num_elements();
     let cube_dim = CubeDim::new(&offset.client, num_elements);
@@ -527,29 +518,29 @@ fn compute_input_grad<R: CubeRuntime>(
 
     unsafe {
         launch(
-            &offset.client,
+            &grad_in.client,
             cube_count,
             cube_dim,
             address_type!(offset, mask, columns, grad_in),
-            offset.as_tensor_arg(1),
-            mask.as_ref().map(|mask| mask.as_tensor_arg(1)).into(),
-            linear_view(&columns, 1),
+            offset.into_tensor_arg(),
+            mask.map(|mask| mask.into_tensor_arg()).into(),
+            reshape(columns, Shape::new([num_elements])).into_linear_view(),
             grad_arg,
             pos_shape,
             DeformConv2dCol2ImgArgsLaunch::new(
-                ScalarArg::new(options.stride[0]),
-                ScalarArg::new(options.stride[1]),
-                ScalarArg::new(options.dilation[0]),
-                ScalarArg::new(options.dilation[1]),
+                options.stride[0],
+                options.stride[1],
+                options.dilation[0],
+                options.dilation[1],
                 InputScalar::new(options.padding[0] as f32, dtypes[0].elem_type()),
                 InputScalar::new(options.padding[1] as f32, dtypes[0].elem_type()),
-                ScalarArg::new(options.offset_groups),
-                ScalarArg::new(kernel_h),
-                ScalarArg::new(kernel_w),
+                options.offset_groups,
+                kernel_h,
+                kernel_w,
             ),
             dtypes,
         )
-    }?;
+    };
 
     Ok(if !supports_same_type || !supports_fadd {
         cast(grad_in, dtype)
@@ -574,7 +565,7 @@ struct DeformConv2dCol2ImgArgs {
 #[cube(launch_unchecked, address_type = "dynamic")]
 fn deform_col2img_kernel<F: Float, FP: Float, FAdd: FloatAtomicAddFamily>(
     offset: &Tensor<F>,
-    mask: &CubeOption<Tensor<F>>,
+    mask: &ComptimeOption<Tensor<F>>,
     columns: &LinearView<F>,
     grad_input: &mut Tensor<Atomic<ProxyType<FAdd, FP>>>,
     pos_shape: Sequence<FastDivmod<usize>>,
@@ -614,15 +605,16 @@ fn deform_col2img_kernel<F: Float, FP: Float, FAdd: FloatAtomicAddFamily>(
     let offset_y = offset[offset_y_idx];
     let offset_x = offset[offset_x_idx];
 
+    #[comptime]
     let mask_value = match mask {
-        CubeOption::Some(mask) => {
+        ComptimeOption::Some(mask) => {
             let mask_pos_1 = offset_group * kernel_h * kernel_w + kernel_y * kernel_w + kernel_x;
             mask[batch * mask.stride(0)
                 + mask_pos_1 * mask.stride(1)
                 + out_y * mask.stride(2)
                 + out_x * mask.stride(3)]
         }
-        CubeOption::None => F::new(1.0),
+        ComptimeOption::None => F::new(1.0),
     };
 
     let y = F::cast_from(out_y * args.stride_h + kernel_y * args.dilation_h)

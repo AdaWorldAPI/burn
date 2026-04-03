@@ -6,16 +6,19 @@ use burn_backend::{
     DType, Shape,
     ops::{AttentionModuleOptions, attention::attention_fallback},
 };
-use cubek::attention::definition::{
-    AccumulatorPrecision, AttentionGlobalTypes, AttentionOptions, AttentionSetupError,
-};
 use cubek::attention::launch;
+use cubek::attention::{
+    definition::{
+        AccumulatorPrecision, AttentionGlobalTypes, AttentionOptions, AttentionSetupError,
+    },
+    routines::blackbox_accelerated::BlackboxAcceleratedStrategy,
+};
 
 #[derive(Debug)]
 /// Strategy used to select which attention implementation to run.
 pub enum AttentionStrategy {
     /// Flash Attention using accelerated inner matmuls.
-    FlashBlackboxAccelerated,
+    FlashBlackboxAccelerated(BlackboxAcceleratedStrategy),
 
     /// Flash Attention using unit inner matmuls.
     FlashUnit,
@@ -49,21 +52,18 @@ pub fn attention<R: CubeRuntime>(
     mask: Option<CubeTensor<R>>,
     attn_bias: Option<CubeTensor<R>>,
     options: AttentionModuleOptions,
-    strategy: &AttentionStrategy,
-    out: Option<CubeTensor<R>>,
+    strategy: AttentionStrategy,
 ) -> Result<CubeTensor<R>, AttentionSetupError> {
-    let mut out = out.unwrap_or_else(|| init_attention_output(&query, &value));
     match strategy {
-        AttentionStrategy::FlashBlackboxAccelerated => flash_attention(
+        AttentionStrategy::FlashBlackboxAccelerated(strategy) => flash_attention(
             query,
             key,
             value,
             mask,
             attn_bias,
             options,
-            out,
             launch::Strategy::BlackboxAccelerated(
-                cubek::attention::launch::BlueprintStrategy::Inferred(()),
+                cubek::attention::launch::BlueprintStrategy::Inferred(strategy),
             ),
         ),
         AttentionStrategy::FlashUnit => flash_attention(
@@ -73,19 +73,15 @@ pub fn attention<R: CubeRuntime>(
             mask,
             attn_bias,
             options,
-            out,
             launch::Strategy::Unit(cubek::attention::launch::BlueprintStrategy::Inferred(())),
         ),
-        AttentionStrategy::Fallback => {
-            out = attention_fallback::<CubeBackend<R, f32, i32, u8>>(
-                query, key, value, mask, attn_bias, options,
-            );
-            Ok(out)
-        }
+        AttentionStrategy::Fallback => Ok(attention_fallback::<CubeBackend<R, f32, i32, u8>>(
+            query, key, value, mask, attn_bias, options,
+        )),
         #[cfg(feature = "autotune")]
-        AttentionStrategy::Autotune => {
-            attention_autotune(query, key, value, mask, attn_bias, options, out)
-        }
+        AttentionStrategy::Autotune => Ok(attention_autotune(
+            query, key, value, mask, attn_bias, options,
+        )),
     }
 }
 
@@ -98,10 +94,10 @@ pub fn flash_attention<R: CubeRuntime>(
     mask: Option<CubeTensor<R>>,
     _attn_bias: Option<CubeTensor<R>>,
     options: AttentionModuleOptions,
-    out: CubeTensor<R>,
     strategy: launch::Strategy,
 ) -> Result<CubeTensor<R>, AttentionSetupError> {
-    let client = &query.client;
+    let client = query.client.clone();
+    let out = init_attention_output(&query, &value);
 
     let dtypes = AttentionGlobalTypes {
         query: query.dtype.into(),
@@ -113,12 +109,12 @@ pub fn flash_attention<R: CubeRuntime>(
 
     cubek::attention::launch::launch_ref::<R>(
         strategy,
-        client,
-        &query.as_handle_ref(),
-        &key.as_handle_ref(),
-        &value.as_handle_ref(),
-        &mask.as_ref().map(|mask| mask.as_handle_ref()),
-        &out.as_handle_ref(),
+        &client,
+        query.binding(),
+        key.binding(),
+        value.binding(),
+        mask.map(|mask| mask.binding()),
+        out.clone().binding(),
         &dtypes,
         AttentionOptions {
             causal: options.is_causal,

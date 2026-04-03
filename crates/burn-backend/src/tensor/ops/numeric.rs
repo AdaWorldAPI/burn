@@ -1,4 +1,4 @@
-use burn_std::Shape;
+use burn_std::{DType, Shape};
 
 use crate::{Backend, Distribution, Scalar, element::Element, tensor::BasicOps};
 
@@ -495,26 +495,12 @@ where
     /// function, which is more high-level and designed for public use.
     fn abs(tensor: Self::Primitive) -> Self::Primitive;
 
-    /// Element-wise power of a tensor to a float tensor
-    ///
-    /// # Arguments
-    /// * `tensor` - The tensor to apply power to.
-    /// * `power` - The power to apply to the tensor.
-    fn powf(lhs: Self::Primitive, rhs: Self::Primitive) -> Self::Primitive;
-
     /// Element-wise power of a tensor
     ///
     /// # Arguments
     /// * `tensor` - The tensor to apply power to.
     /// * `power` - The power to apply to the tensor.
     fn powi(lhs: Self::Primitive, rhs: Self::Primitive) -> Self::Primitive;
-
-    /// Element-wise power of a tensor to a scalar float
-    ///
-    /// # Arguments
-    /// * `tensor` - The tensor to apply power to.
-    /// * `power` - The power to apply to the tensor.
-    fn powf_scalar(lhs: Self::Primitive, rhs: Scalar) -> Self::Primitive;
 
     /// Element-wise power of a tensor to a scalar int
     ///
@@ -530,6 +516,7 @@ where
     /// * `shape` - The shape of the output tensor.
     /// * `distribution` - The distribution used to sample.
     /// * `device` - The device to use.
+    /// * `dtype` - The target data type.
     ///
     /// # Returns
     ///
@@ -545,7 +532,12 @@ where
     #[cfg_attr(doc, doc = crate::doc_tensor!("random"))]
     #[cfg_attr(not(doc), doc = "`Tensor::random`")]
     /// function, which is more high-level and designed for public use.
-    fn random(shape: Shape, distribution: Distribution, device: &B::Device) -> Self::Primitive;
+    fn random(
+        shape: Shape,
+        distribution: Distribution,
+        device: &B::Device,
+        dtype: DType,
+    ) -> Self::Primitive;
 
     /// Applies the matrix multiplication operation.
     ///

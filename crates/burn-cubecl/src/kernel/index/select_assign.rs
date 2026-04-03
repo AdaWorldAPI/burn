@@ -1,6 +1,6 @@
 use crate::kernel::{
     AddOp, BinaryOp, BinaryOpFamily, OrOp,
-    utils::{address_type, linear_view, shape_divmod},
+    utils::{address_type, shape_divmod},
 };
 use crate::{CubeRuntime, tensor::CubeTensor};
 use cubecl::{CubeDim, calculate_cube_count_elemwise, std::tensor::layout::linear::LinearView};
@@ -47,9 +47,9 @@ fn select_assign_kernel<F: Numeric, I: Numeric, Op: BinaryOpFamily>(
         let index_tensor = usize::cast_from(indices[i]) * strides_tensor_dim + offset_tensor;
         let index_value = i * strides_value_dim + offset_value;
 
-        let value = Op::BinaryOp::<F>::execute(
-            Line::cast_from(tensor[index_tensor]),
-            Line::cast_from(value[index_value]),
+        let value = Op::BinaryOp::<F, Const<1>>::execute(
+            Vector::cast_from(tensor[index_tensor]),
+            Vector::cast_from(value[index_value]),
         );
         tensor[index_tensor] = F::cast_from(value);
     }
@@ -77,21 +77,23 @@ pub(crate) fn select_assign<R: CubeRuntime>(
         false => select_assign_kernel::launch_unchecked::<AddOp, R>,
     };
 
+    let (tensor_dtype, indices_dtype) = (tensor.dtype, indices.dtype);
+
+    let shape = shape_divmod(&value);
     unsafe {
         launch(
             &tensor.client,
             cube_count,
             cube_dim,
             address_type!(tensor, indices, value),
-            tensor.as_tensor_arg(1),
-            linear_view(&indices, 1),
-            value.as_tensor_arg(1),
-            shape_divmod(&value),
-            ScalarArg::new(num_elems),
+            tensor.clone().into_tensor_arg(),
+            indices.into_linear_view(),
+            value.into_tensor_arg(),
+            shape,
+            num_elems,
             dim,
-            [tensor.dtype.into(), indices.dtype.into()],
+            [tensor_dtype.into(), indices_dtype.into()],
         )
-        .expect("Kernel to never fail");
     };
 
     tensor

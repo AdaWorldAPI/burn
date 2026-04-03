@@ -1,12 +1,12 @@
 use cubecl::{
     calculate_cube_count_elemwise,
     prelude::*,
-    std::{CubeOption, CubeOptionExpand, FastDivmod, tensor::layout::linear::LinearView},
+    std::{FastDivmod, tensor::layout::linear::LinearView},
 };
 
 use crate::{
     CubeRuntime,
-    kernel::utils::{address_type, decompose_linear, linear_view, shape_divmod},
+    kernel::utils::{address_type, decompose_linear, shape_divmod},
     ops::numeric::empty_device_dtype,
     tensor::CubeTensor,
 };
@@ -30,7 +30,7 @@ struct ConvArgs {
 fn conv_transpose3d_kernel<E: Numeric>(
     input: &Tensor<E>,
     weight: &Tensor<E>,
-    bias: &CubeOption<Tensor<E>>,
+    bias: &ComptimeOption<Tensor<E>>,
     output: &mut LinearView<E, ReadWrite>,
     out_shape: Sequence<FastDivmod<usize>>,
     args: ConvArgs,
@@ -80,10 +80,8 @@ fn conv_transpose3d_kernel<E: Numeric>(
     let index_input_batch = batch * input.stride(0);
     let index_weight_out_c = out_channel * weight.stride(1);
 
-    let mut sum = match bias {
-        CubeOption::Some(bias) => bias[out_c_out],
-        CubeOption::None => E::from_int(0),
-    };
+    let bias: ComptimeOption<E> = bias.map(|bias| bias[out_c_out]);
+    let mut sum = bias.unwrap_or_default();
 
     let numerator_d_base = out_z + args.padding_0;
     let numerator_h_base = out_y + args.padding_1;
@@ -195,30 +193,31 @@ pub(crate) fn conv_transpose3d<R: CubeRuntime>(
     let cube_dim = CubeDim::new(&input.client, num_elems);
     let cube_count = calculate_cube_count_elemwise(&input.client, num_elems, cube_dim);
 
+    let dtype = input.dtype;
     conv_transpose3d_kernel::launch(
-        &input.client,
+        &output.client,
         cube_count,
         cube_dim,
         address_type!(input, weight, bias, output),
-        input.as_tensor_arg(1),
-        weight.as_tensor_arg(1),
-        bias.as_ref().map(|bias| bias.as_tensor_arg(1)).into(),
-        linear_view(&output, 1),
+        input.into_tensor_arg(),
+        weight.into_tensor_arg(),
+        bias.map(|bias| bias.into_tensor_arg()).into(),
+        output.clone().into_linear_view(),
         shape_divmod(&output),
         ConvArgsLaunch::new(
-            ScalarArg::new(options.stride[0]),
-            ScalarArg::new(options.stride[1]),
-            ScalarArg::new(options.stride[2]),
-            ScalarArg::new(options.dilation[0]),
-            ScalarArg::new(options.dilation[1]),
-            ScalarArg::new(options.dilation[2]),
-            ScalarArg::new(options.padding[0]),
-            ScalarArg::new(options.padding[1]),
-            ScalarArg::new(options.padding[2]),
-            ScalarArg::new(options.groups),
+            options.stride[0],
+            options.stride[1],
+            options.stride[2],
+            options.dilation[0],
+            options.dilation[1],
+            options.dilation[2],
+            options.padding[0],
+            options.padding[1],
+            options.padding[2],
+            options.groups,
         ),
-        input.dtype.into(),
-    )?;
+        dtype.into(),
+    );
 
     Ok(output)
 }

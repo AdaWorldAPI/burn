@@ -1,14 +1,16 @@
 use crate::CubeRuntime;
-use crate::element::CubeElement;
 use crate::kernel::{NumericUnaryOp, NumericUnaryOpFamily, launch_unary_numeric};
 use burn_backend::quantization::QuantScheme;
 use burn_backend::{DType, QTensorPrimitive, Shape, TensorMetadata};
 use burn_std::{Metadata, strides, tensor::is_contiguous};
-use cubecl::client::ComputeClient;
-use cubecl::frontend::Numeric;
-use cubecl::prelude::{TensorHandleRef, *};
 use cubecl::server::Handle;
 use cubecl::std::tensor::TensorHandle;
+use cubecl::{client::ComputeClient, std::tensor::layout::linear::LinearViewLaunch};
+use cubecl::{frontend::Numeric, std::tensor::layout::linear::LinearViewLayoutLaunch};
+use cubecl::{
+    prelude::{TensorBinding, *},
+    std::tensor::layout::linear::LinearViewLayout,
+};
 use std::marker::PhantomData;
 
 use super::QParams;
@@ -32,10 +34,10 @@ pub struct CubeTensor<R: CubeRuntime> {
 impl<R: CubeRuntime> From<CubeTensor<R>> for TensorHandle<R> {
     fn from(val: CubeTensor<R>) -> Self {
         TensorHandle::new(
-            val.handle,
+            val.handle.clone(),
             val.meta.shape().clone(),
             val.meta.strides().clone(),
-            val.dtype.into(),
+            val.dtype,
         )
     }
 }
@@ -51,6 +53,17 @@ impl<R: CubeRuntime> cubecl::tune::AutotuneOutput for CubeTensor<R> {
         expected.assert_approx_eq::<f32>(&actual, Tolerance::permissive());
     }
 }
+
+// TODO: Needed to cleanup leaves tensor.
+//
+// Maybe not needed when fusion is activated, since we have a detector there.
+// We could rely on basic GC strategy when not using fusion.
+//
+// impl<R: CubeRuntime> Drop for CubeTensor<R> {
+//     fn drop(&mut self) {
+//         todo!()
+//     }
+// }
 
 impl<R> core::fmt::Debug for CubeTensor<R>
 where
@@ -162,15 +175,17 @@ where
 
     /// Change the context of the current tensor and return the newly transferred tensor.
     pub fn to_client(&self, client: ComputeClient<R>, device: R::Device) -> Self {
-        let desc =
-            self.handle
-                .copy_descriptor(self.meta.shape(), self.meta.strides(), self.elem_size());
-        let alloc = self.client.to_client_tensor(desc, &client);
+        let desc = self.handle.clone().copy_descriptor(
+            self.meta.shape().clone(),
+            self.meta.strides().clone(),
+            self.elem_size(),
+        );
+        let handle = self.client.to_client_tensor(desc, &client);
 
         Self {
             client,
-            handle: alloc.handle,
-            meta: Box::new(Metadata::new(self.shape(), alloc.strides)),
+            handle,
+            meta: Box::new(Metadata::new(self.shape(), self.meta.strides().clone())),
             device,
             dtype: self.dtype,
             qparams: self.qparams.clone(),
@@ -178,13 +193,12 @@ where
     }
 
     /// Return the reference to a tensor handle.
-    pub fn as_handle_ref(&self) -> TensorHandleRef<'_, R> {
-        TensorHandleRef {
-            handle: &self.handle,
-            strides: self.meta.strides(),
-            shape: self.meta.shape(),
+    pub fn binding(self) -> TensorBinding<R> {
+        TensorBinding {
+            handle: self.handle.binding(),
+            strides: self.meta.strides,
+            shape: self.meta.shape,
             runtime: PhantomData,
-            elem_size: self.elem_size(),
         }
     }
 
@@ -194,30 +208,43 @@ where
     }
 
     /// Return the reference to a tensor argument.
-    pub fn as_tensor_arg<'a>(&'a self, line_size: LineSize) -> TensorArg<'a, R> {
-        let size = self.dtype.size();
-        let handle: TensorHandleRef<'a, R> = self.as_handle_ref();
-
-        unsafe {
-            TensorArg::from_raw_parts_and_size(
-                handle.handle,
-                handle.strides,
-                handle.shape,
-                line_size,
-                size,
-            )
-        }
+    pub fn into_tensor_arg(self) -> TensorArg<R> {
+        self.binding().into_tensor_arg()
     }
 
     /// Return the reference to an array argument.
-    pub fn as_array_arg<E: CubeElement>(&self, line_size: LineSize) -> ArrayArg<'_, R> {
-        unsafe {
-            ArrayArg::from_raw_parts::<E>(
-                &self.handle,
-                self.handle.size() as usize / core::mem::size_of::<E>(),
-                line_size,
-            )
+    pub fn into_array_arg(self) -> ArrayArg<R> {
+        self.into_tensor_arg().into_array_arg()
+    }
+
+    /// Returns a reference to the aliased tensor argument.
+    pub fn as_tensor_alias(&self, input_pos: usize) -> TensorArg<R> {
+        TensorArg::Alias {
+            input_pos,
+            strides: self.meta.strides().clone(),
+            shape: self.meta.shape().clone(),
         }
+    }
+
+    /// Return a linear view of this tensor.
+    pub fn into_linear_view(self) -> LinearViewLaunch<R> {
+        let layout = LinearViewLayoutLaunch::new();
+        let buffer = self.into_tensor_arg();
+        LinearViewLaunch::new_tensor::<LinearViewLayout>(buffer, layout)
+    }
+
+    /// Return an aliased linear view of this tensor
+    pub fn as_linear_view_alias(&self, input_pos: usize) -> LinearViewLaunch<R> {
+        let layout = LinearViewLayoutLaunch::new();
+        let buffer = self.as_tensor_alias(input_pos);
+        LinearViewLaunch::new_tensor::<LinearViewLayout>(buffer, layout)
+    }
+
+    /// Return a linear view broadcast to the reference tensor's shape
+    pub fn into_linear_view_like(self, reference: &Self) -> LinearViewLaunch<R> {
+        let layout = LinearViewLayoutLaunch::from_reference_shape(reference.shape());
+        let buffer = self.into_tensor_arg();
+        LinearViewLaunch::new_tensor::<LinearViewLayout>(buffer, layout)
     }
 
     /// Returns the address type required to index this tensor
@@ -263,17 +290,17 @@ where
         struct Copy;
 
         #[cube]
-        impl<N: Numeric> NumericUnaryOp<N> for Copy {
+        impl<T: Numeric, N: Size> NumericUnaryOp<T, N> for Copy {
             type Options = ();
 
-            fn execute(input: Line<N>, _options: &Self::Options) -> Line<N> {
+            fn execute(input: Vector<T, N>, _options: &Self::Options) -> Vector<T, N> {
                 input
             }
         }
 
         impl NumericUnaryOpFamily for Copy {
             type Options = ();
-            type Unary<N: Numeric> = Self;
+            type Unary<T: Numeric, N: Size> = Self;
         }
 
         let tensor = self.clone();

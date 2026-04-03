@@ -1,6 +1,6 @@
 use crate::{
     CubeRuntime,
-    kernel::utils::{address_type, linear_view, shape_divmod},
+    kernel::utils::{address_type, shape_divmod},
     ops::numeric::empty_device_dtype,
     tensor::CubeTensor,
 };
@@ -67,7 +67,7 @@ pub(crate) fn flip_on_output<R: CubeRuntime>(
 ) -> CubeTensor<R> {
     let dtype_input = tensor.dtype;
     let ndims = tensor.meta.num_dims();
-    let mut indices_sequence = SequenceArg::<'_, R, InputScalar>::new();
+    let mut indices_sequence = SequenceArg::<R, InputScalar>::new();
 
     for i in 0..ndims {
         indices_sequence.push({
@@ -80,19 +80,19 @@ pub(crate) fn flip_on_output<R: CubeRuntime>(
     let cube_dim = CubeDim::new(&tensor.client, num_elements);
     let cube_count = calculate_cube_count_elemwise(&tensor.client, num_elements, cube_dim);
 
+    let shape = shape_divmod(&tensor);
     unsafe {
         flip_kernel::launch_unchecked(
-            &tensor.client,
+            &output.client,
             cube_count,
             cube_dim,
             address_type!(tensor, output),
-            tensor.as_tensor_arg(1),
-            linear_view(&output, 1),
-            shape_divmod(&tensor),
+            tensor.into_tensor_arg(),
+            output.clone().into_linear_view(),
+            shape,
             indices_sequence,
             [dtype_input.into(), dtype_bool.into()],
         )
-        .expect("Kernel to never fail");
     }
 
     output

@@ -336,9 +336,20 @@ where
             mask,
             attn_bias,
             options,
-            &Default::default(),
-            None,
+            Default::default(),
         )
         .expect("Kernel to never fail")
+    }
+
+    fn rfft(signal: FloatTensor<Self>, dim: usize) -> (FloatTensor<Self>, FloatTensor<Self>) {
+        kernel::fft::rfft(signal, dim)
+    }
+
+    fn irfft(
+        spectrum_re: FloatTensor<Self>,
+        spectrum_im: FloatTensor<Self>,
+        dim: usize,
+    ) -> FloatTensor<Self> {
+        kernel::fft::irfft(spectrum_re, spectrum_im, dim)
     }
 }

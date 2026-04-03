@@ -1,6 +1,6 @@
 use super::{RemoteChannel, RemoteClient};
 use crate::shared::{ComputeTask, TaskResponseContent, TensorRemote};
-use burn_backend::{DeviceId, DeviceOps, ExecutionError, Shape, TensorData};
+use burn_backend::{DeviceId, DeviceOps, ExecutionError, TensorData};
 use burn_communication::{Address, ProtocolClient, data_service::TensorTransferId};
 use burn_ir::TensorIr;
 use burn_router::{MultiBackendBridge, RouterTensor, RunnerClient, get_client};
@@ -84,7 +84,7 @@ impl RunnerClient for RemoteClient {
 
         self.sender.send(ComputeTask::RegisterTensor(id, data));
 
-        RouterTensor::new(id, Shape::from(shape), dtype, self.clone())
+        RouterTensor::new(id, shape, dtype, self.clone())
     }
 
     fn device(&self) -> Self::Device {
@@ -116,10 +116,13 @@ impl RunnerClient for RemoteClient {
     }
 
     fn dtype_usage(&self, dtype: burn_std::DType) -> burn_backend::DTypeUsageSet {
-        let fut = self.sender.send_async(ComputeTask::SupportsDType(dtype));
+        let fut = self.sender.send_async(ComputeTask::DTypeUsage(dtype));
 
         match self.runtime.block_on(fut) {
-            Ok(_response) => panic!("Invalid message type"),
+            Ok(response) => match response {
+                TaskResponseContent::DTypeUsage(res) => res,
+                other => panic!("Invalid message type {other:?}"),
+            },
             Err(e) => panic!("Failed to check dtype support: {:?}", e),
         }
     }
@@ -170,10 +173,6 @@ impl burn_std::device::Device for RemoteDevice {
             type_id: 0,
             index_id: self.id,
         }
-    }
-
-    fn device_count(_type_id: u16) -> usize {
-        1
     }
 }
 

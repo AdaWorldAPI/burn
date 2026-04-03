@@ -1,4 +1,4 @@
-use cubecl::std::{FastDivmod, FastDivmodArgs};
+use cubecl::std::FastDivmod;
 use cubecl::{calculate_cube_count_elemwise, prelude::*};
 
 use crate::{
@@ -150,7 +150,7 @@ pub(crate) fn grid_sample_bilinear_launch<R: CubeRuntime>(
 
     let mut shape_spatial = SequenceArg::new();
     for dim in spatial_shape.iter() {
-        shape_spatial.push(FastDivmodArgs::new(&input.client, *dim));
+        shape_spatial.push(*dim);
     }
 
     let cube_dim = CubeDim::new(&input.client, num_spatial);
@@ -158,20 +158,21 @@ pub(crate) fn grid_sample_bilinear_launch<R: CubeRuntime>(
 
     let padding_mode: PaddingMode = options.padding_mode.into();
 
+    let dtype = input.dtype;
+
     grid_sample_bilinear_kernel::launch(
-        &input.client,
+        &output.client,
         cube_count,
         cube_dim,
         address_type!(input, grid, output),
-        input.as_tensor_arg(1),
-        grid.as_tensor_arg(1),
-        output.as_tensor_arg(1),
+        input.into_tensor_arg(),
+        grid.into_tensor_arg(),
+        output.clone().into_tensor_arg(),
         shape_spatial,
         options.align_corners,
         padding_mode,
-        input.dtype.into(),
-    )
-    .expect("Grid sample kernel failed");
+        dtype.into(),
+    );
 
     output
 }

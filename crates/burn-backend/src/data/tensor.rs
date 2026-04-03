@@ -12,24 +12,51 @@ use crate::Scalar;
 use crate::distribution::Distribution;
 use crate::element::{Element, ElementConversion};
 use burn_std::tensor::DType;
-use burn_std::{Bytes, QuantLevel, QuantMode, QuantScheme, QuantValue, QuantizedBytes, bf16, f16};
+use burn_std::{
+    BoolStore, Bytes, QuantLevel, QuantMode, QuantScheme, QuantValue, QuantizedBytes, Shape, bf16,
+    f16,
+};
+
+use serde::{Deserialize, Serialize};
 
 /// Data structure for tensors.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorData {
     /// The values of the tensor (as bytes).
     pub bytes: Bytes,
 
     /// The shape of the tensor.
-    pub shape: Vec<usize>,
+    #[serde(with = "shape_inner")]
+    pub shape: Shape,
 
     /// The data type of the tensor.
     pub dtype: DType,
 }
 
+// For backward compatibility with shape `Vec<usize>`
+mod shape_inner {
+    use burn_std::SmallVec;
+
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        shape: &Shape,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        shape.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Shape, D::Error> {
+        let dims = SmallVec::<[usize; _]>::deserialize(deserializer)?;
+        Ok(Shape::new_raw(dims))
+    }
+}
+
 impl TensorData {
     /// Creates a new tensor data structure.
-    pub fn new<E: Element, S: Into<Vec<usize>>>(value: Vec<E>, shape: S) -> Self {
+    pub fn new<E: Element, S: Into<Shape>>(value: Vec<E>, shape: S) -> Self {
         // Ensure shape is valid
         let shape = shape.into();
         Self::check_data_len(&value, &shape);
@@ -42,7 +69,7 @@ impl TensorData {
     }
 
     /// Creates a new quantized tensor data structure.
-    pub fn quantized<E: Element, S: Into<Vec<usize>>>(
+    pub fn quantized<E: Element, S: Into<Shape>>(
         value: Vec<E>,
         shape: S,
         scheme: QuantScheme,
@@ -61,7 +88,7 @@ impl TensorData {
     }
 
     /// Creates a new tensor data structure from raw bytes.
-    pub fn from_bytes<S: Into<Vec<usize>>>(bytes: Bytes, shape: S, dtype: DType) -> Self {
+    pub fn from_bytes<S: Into<Shape>>(bytes: Bytes, shape: S, dtype: DType) -> Self {
         Self {
             bytes,
             shape: shape.into(),
@@ -73,7 +100,7 @@ impl TensorData {
     ///
     /// Prefer [`TensorData::new`] or [`TensorData::quantized`] over this method unless you are
     /// certain that the bytes representation is valid.
-    pub fn from_bytes_vec<S: Into<Vec<usize>>>(bytes: Vec<u8>, shape: S, dtype: DType) -> Self {
+    pub fn from_bytes_vec<S: Into<Shape>>(bytes: Vec<u8>, shape: S, dtype: DType) -> Self {
         Self {
             bytes: Bytes::from_bytes_vec(bytes),
             shape: shape.into(),
@@ -82,7 +109,7 @@ impl TensorData {
     }
 
     // Check that the input vector contains a correct number of elements
-    fn check_data_len<E: Element>(data: &[E], shape: &Vec<usize>) {
+    fn check_data_len<E: Element>(data: &[E], shape: &Shape) {
         let expected_data_len = Self::numel(shape);
         let num_data = data.len();
         assert_eq!(
@@ -93,12 +120,12 @@ impl TensorData {
 
     /// Returns the immutable slice view of the tensor data.
     pub fn as_slice<E: Element>(&self) -> Result<&[E], DataError> {
-        if E::dtype() == self.dtype {
+        if self.matches_target_dtype::<E>() {
             match E::dtype() {
                 // The only way to create a bool `TensorData` with invalid values is by unsafely modifying
                 // the dtype. This should be considered unsafe to begin with, so we unsafely cast bool
                 // to u8 to skip bit validation. Validation iterates through the entire vector, so it's slow.
-                DType::Bool => {
+                DType::Bool(BoolStore::Native) => {
                     let slice = bytemuck::checked::try_cast_slice::<_, u8>(&self.bytes)
                         .map_err(DataError::CastError)?;
                     Ok(unsafe { core::mem::transmute::<&[u8], &[E]>(slice) })
@@ -119,12 +146,12 @@ impl TensorData {
     /// # Panics
     /// If the target element type is different from the stored element type.
     pub fn as_mut_slice<E: Element>(&mut self) -> Result<&mut [E], DataError> {
-        if E::dtype() == self.dtype {
+        if self.matches_target_dtype::<E>() {
             match E::dtype() {
                 // The only way to create a bool `TensorData` with invalid values is by unsafely modifying
                 // the dtype. This should be considered unsafe to begin with, so we unsafely cast bool
                 // to u8 to skip bit validation. Validation iterates through the entire vector, so it's slow.
-                DType::Bool => {
+                DType::Bool(BoolStore::Native) => {
                     let slice = bytemuck::checked::try_cast_slice_mut::<_, u8>(&mut self.bytes)
                         .map_err(DataError::CastError)?;
                     Ok(unsafe { core::mem::transmute::<&mut [u8], &mut [E]>(slice) })
@@ -149,7 +176,7 @@ impl TensorData {
     /// Returns the tensor data as a vector of scalar values.
     pub fn into_vec<E: Element>(self) -> Result<Vec<E>, DataError> {
         // This means we cannot call `into_vec` for QFloat
-        if E::dtype() != self.dtype {
+        if !self.matches_target_dtype::<E>() {
             return Err(DataError::TypeMismatch(format!(
                 "Invalid target element type (expected {:?}, got {:?})",
                 self.dtype,
@@ -161,7 +188,7 @@ impl TensorData {
             // The only way to create a bool `TensorData` with invalid values is by unsafely modifying
             // the dtype. This should be considered unsafe to begin with, so we unsafely cast bool
             // to u8 to skip bit validation. Validation iterates through the entire vector, so it's slow.
-            DType::Bool => {
+            DType::Bool(BoolStore::Native) => {
                 let vec = self.into_vec_unchecked::<u8>()?;
                 Ok(unsafe { core::mem::transmute::<Vec<u8>, Vec<E>>(vec) })
             }
@@ -182,6 +209,19 @@ impl TensorData {
         Ok(bytemuck::checked::try_cast_slice(me.as_bytes())
             .map_err(DataError::CastError)?
             .to_vec())
+    }
+
+    fn matches_target_dtype<E: Element>(&self) -> bool {
+        let target_dtype = E::dtype();
+        match self.dtype {
+            DType::Bool(BoolStore::U8) => {
+                matches!(target_dtype, DType::U8 | DType::Bool(BoolStore::U8))
+            }
+            DType::Bool(BoolStore::U32) => {
+                matches!(target_dtype, DType::U32 | DType::Bool(BoolStore::U32))
+            }
+            dtype => dtype == target_dtype,
+        }
     }
 
     /// Returns an iterator over the values of the tensor data.
@@ -247,7 +287,14 @@ impl TensorData {
                         .map(|e: &f64| e.elem::<E>()),
                 ),
                 // bool is a byte value equal to either 0 or 1
-                DType::Bool => Box::new(self.bytes.iter().map(|e| e.elem::<E>())),
+                DType::Bool(BoolStore::Native) | DType::Bool(BoolStore::U8) => {
+                    Box::new(self.bytes.iter().map(|e| e.elem::<E>()))
+                }
+                DType::Bool(BoolStore::U32) => Box::new(
+                    bytemuck::checked::cast_slice(&self.bytes)
+                        .iter()
+                        .map(|e: &u32| e.elem::<E>()),
+                ),
                 DType::QFloat(scheme) => match scheme {
                     QuantScheme {
                         level: QuantLevel::Tensor | QuantLevel::Block(_),
@@ -307,7 +354,7 @@ impl TensorData {
     }
 
     /// Populates the data with random values.
-    pub fn random<E: Element, R: Rng, S: Into<Vec<usize>>>(
+    pub fn random<E: Element, R: Rng, S: Into<Shape>>(
         shape: S,
         distribution: Distribution,
         rng: &mut R,
@@ -324,7 +371,7 @@ impl TensorData {
     }
 
     /// Populates the data with zeros.
-    pub fn zeros<E: Element, S: Into<Vec<usize>>>(shape: S) -> TensorData {
+    pub fn zeros<E: Element, S: Into<Shape>>(shape: S) -> TensorData {
         let shape = shape.into();
         let num_elements = Self::numel(&shape);
         let mut data = Vec::<E>::with_capacity(num_elements);
@@ -337,7 +384,7 @@ impl TensorData {
     }
 
     /// Populates the data with ones.
-    pub fn ones<E: Element, S: Into<Vec<usize>>>(shape: S) -> TensorData {
+    pub fn ones<E: Element, S: Into<Shape>>(shape: S) -> TensorData {
         let shape = shape.into();
         let num_elements = Self::numel(&shape);
         let mut data = Vec::<E>::with_capacity(num_elements);
@@ -350,7 +397,7 @@ impl TensorData {
     }
 
     /// Populates the data with the given value
-    pub fn full<E: Element, S: Into<Vec<usize>>>(shape: S, fill_value: E) -> TensorData {
+    pub fn full<E: Element, S: Into<Shape>>(shape: S, fill_value: E) -> TensorData {
         let shape = shape.into();
         let num_elements = Self::numel(&shape);
         let mut data = Vec::<E>::with_capacity(num_elements);
@@ -362,7 +409,7 @@ impl TensorData {
     }
 
     /// Populates the data with the given value
-    pub fn full_dtype<E: Into<Scalar>, S: Into<Vec<usize>>>(
+    pub fn full_dtype<E: Into<Scalar>, S: Into<Shape>>(
         shape: S,
         fill_value: E,
         dtype: DType,
@@ -381,9 +428,27 @@ impl TensorData {
             DType::U32 => Self::full::<u32, _>(shape, fill_value.elem()),
             DType::U16 => Self::full::<u16, _>(shape, fill_value.elem()),
             DType::U8 => Self::full::<u8, _>(shape, fill_value.elem()),
-            DType::Bool => Self::full::<bool, _>(shape, fill_value.elem()),
+            DType::Bool(BoolStore::Native) => Self::full::<bool, _>(shape, fill_value.elem()),
+            DType::Bool(BoolStore::U8) => {
+                Self::full::<u8, _>(shape, fill_value.elem()).into_bool_u8()
+            }
+            DType::Bool(BoolStore::U32) => {
+                Self::full::<u32, _>(shape, fill_value.elem()).into_bool_u32()
+            }
             DType::QFloat(_) => unreachable!(),
         }
+    }
+
+    // Unchecked, used to overwrite the dtype
+    fn into_bool_u8(mut self) -> Self {
+        self.dtype = DType::Bool(BoolStore::U8);
+        self
+    }
+
+    // Unchecked, used to overwrite the dtype
+    fn into_bool_u32(mut self) -> Self {
+        self.dtype = DType::Bool(BoolStore::U32);
+        self
     }
 
     /// Converts the data to a different element type.
@@ -396,8 +461,11 @@ impl TensorData {
         if dtype == self.dtype {
             self
         } else if dtype.size() == self.dtype.size()
-            && !matches!(self.dtype, DType::Bool | DType::QFloat(_))
-            && !matches!(dtype, DType::Bool | DType::QFloat(_))
+            && !matches!(
+                self.dtype,
+                DType::Bool(BoolStore::Native) | DType::QFloat(_)
+            )
+            && !matches!(dtype, DType::Bool(BoolStore::Native) | DType::QFloat(_))
         {
             match self.dtype {
                 DType::F64 => self.convert_inplace_dtype::<f64>(dtype),
@@ -412,7 +480,9 @@ impl TensorData {
                 DType::U32 => self.convert_inplace_dtype::<u32>(dtype),
                 DType::U16 => self.convert_inplace_dtype::<u16>(dtype),
                 DType::U8 => self.convert_inplace_dtype::<u8>(dtype),
-                DType::Bool | DType::QFloat(_) => unreachable!(),
+                DType::Bool(BoolStore::U8) => self.convert_inplace_dtype::<u8>(dtype),
+                DType::Bool(BoolStore::U32) => self.convert_inplace_dtype::<u32>(dtype),
+                DType::Bool(BoolStore::Native) | DType::QFloat(_) => unreachable!(),
             }
         } else {
             match self.dtype {
@@ -428,7 +498,9 @@ impl TensorData {
                 DType::U32 => self.convert_clone_dtype::<u32>(dtype),
                 DType::U16 => self.convert_clone_dtype::<u16>(dtype),
                 DType::U8 => self.convert_clone_dtype::<u8>(dtype),
-                DType::Bool => self.convert_clone_dtype::<bool>(dtype),
+                DType::Bool(BoolStore::Native) => self.convert_clone_dtype::<bool>(dtype),
+                DType::Bool(BoolStore::U8) => self.convert_clone_dtype::<u8>(dtype),
+                DType::Bool(BoolStore::U32) => self.convert_clone_dtype::<u32>(dtype),
                 DType::QFloat(_) => unreachable!(),
             }
         }
@@ -448,7 +520,9 @@ impl TensorData {
             DType::U32 => self.convert_inplace::<Current, u32>(),
             DType::U16 => self.convert_inplace::<Current, u16>(),
             DType::U8 => self.convert_inplace::<Current, u8>(),
-            DType::Bool | DType::QFloat(_) => unreachable!(),
+            DType::Bool(BoolStore::U8) => self.convert_inplace::<Current, u8>().into_bool_u8(),
+            DType::Bool(BoolStore::U32) => self.convert_inplace::<Current, u32>().into_bool_u32(),
+            DType::Bool(BoolStore::Native) | DType::QFloat(_) => unreachable!(),
         }
     }
 
@@ -480,7 +554,9 @@ impl TensorData {
             DType::U32 => self.convert_clone::<Current, u32>(),
             DType::U16 => self.convert_clone::<Current, u16>(),
             DType::U8 => self.convert_clone::<Current, u8>(),
-            DType::Bool => self.convert_clone::<Current, bool>(),
+            DType::Bool(BoolStore::Native) => self.convert_clone::<Current, bool>(),
+            DType::Bool(BoolStore::U8) => self.convert_clone::<Current, u8>().into_bool_u8(),
+            DType::Bool(BoolStore::U32) => self.convert_clone::<Current, u32>().into_bool_u32(),
             DType::QFloat(_) => unreachable!(),
         }
     }
@@ -630,7 +706,9 @@ impl core::fmt::Display for TensorData {
             DType::U32 => format!("{:?}", self.as_slice::<u32>().unwrap()),
             DType::U16 => format!("{:?}", self.as_slice::<u16>().unwrap()),
             DType::U8 => format!("{:?}", self.as_slice::<u8>().unwrap()),
-            DType::Bool => format!("{:?}", self.as_slice::<bool>().unwrap()),
+            DType::Bool(BoolStore::Native) => format!("{:?}", self.as_slice::<bool>().unwrap()),
+            DType::Bool(BoolStore::U8) => format!("{:?}", self.as_slice::<u8>().unwrap()),
+            DType::Bool(BoolStore::U32) => format!("{:?}", self.as_slice::<u32>().unwrap()),
             DType::QFloat(scheme) => match scheme {
                 QuantScheme {
                     level: QuantLevel::Tensor | QuantLevel::Block(_),
@@ -677,6 +755,7 @@ pub enum DataError {
 mod tests {
     use super::*;
     use alloc::vec;
+    use burn_std::shape;
     use rand::{
         SeedableRng,
         rngs::{StdRng, SysRng},
@@ -739,13 +818,13 @@ mod tests {
     #[test]
     fn should_have_right_shape() {
         let data = TensorData::from([[3.0, 5.0, 6.0]]);
-        assert_eq!(data.shape, vec![1, 3]);
+        assert_eq!(data.shape, shape![1, 3]);
 
         let data = TensorData::from([[4.0, 5.0, 8.0], [3.0, 5.0, 6.0]]);
-        assert_eq!(data.shape, vec![2, 3]);
+        assert_eq!(data.shape, shape![2, 3]);
 
         let data = TensorData::from([3.0, 5.0, 6.0]);
-        assert_eq!(data.shape, vec![3]);
+        assert_eq!(data.shape, shape![3]);
     }
 
     #[test]
@@ -812,4 +891,46 @@ mod tests {
         f32,
         f64
     );
+
+    #[test]
+    fn should_serialize_deserialize_tensor_data() {
+        let data = TensorData::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+        assert_eq!(
+            data.as_bytes(),
+            [
+                0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64, 0, 0, 192,
+                64
+            ]
+        );
+        let serialized = serde_json::to_string(&data).unwrap();
+        let deserialized: TensorData = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(data, deserialized);
+    }
+
+    #[test]
+    fn should_deserialize_tensor_data_with_shape_inner() {
+        // TensorData `shape` was previously a Vec<usize>.
+        let serialized = r#"{
+        "bytes": [0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64, 0, 0, 192, 64],
+        "shape": [2, 3],
+        "dtype": "F32"
+    }"#;
+
+        let data: TensorData = serde_json::from_str(serialized).unwrap();
+        assert_eq!(data.shape, shape![2, 3]);
+        assert_eq!(
+            data.as_slice::<f32>().unwrap(),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn should_serialize_shape_as_flat_array() {
+        // Ensure the new Shape serializes identically to how Vec<usize> used to,
+        // i.e. as a flat JSON array, not as an object like `{"dims": [2, 3]}`.
+        let data = TensorData::new(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]);
+        let serialized = serde_json::to_string(&data).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(json["shape"], serde_json::json!([2, 3]));
+    }
 }

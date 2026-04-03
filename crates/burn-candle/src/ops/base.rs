@@ -9,14 +9,26 @@ use burn_backend::{
     BackTrace, Backend, Distribution, ExecutionError, Slice, bf16, f16,
     ops::unfold::{calculate_unfold_shape, calculate_unfold_windows},
 };
-use burn_backend::{Element, Shape, TensorData, TensorMetadata};
+use burn_backend::{DType, Element, Shape, TensorData, TensorMetadata};
 use candle_core::{Layout, WithDType};
 
 use super::tensor;
 
-pub fn cpu_random<E: CandleElement>(shape: Shape, distribution: Distribution) -> TensorData {
+pub fn cpu_random(shape: Shape, distribution: Distribution, dtype: DType) -> TensorData {
     let mut rng = crate::get_seeded_rng();
-    let data = TensorData::random::<E, _, _>(shape, distribution, &mut rng);
+    let data = match dtype {
+        DType::F64 => TensorData::random::<f64, _, _>(shape, distribution, &mut rng),
+        DType::F32 => TensorData::random::<f32, _, _>(shape, distribution, &mut rng),
+        DType::Flex32 => TensorData::random::<f32, _, _>(shape, distribution, &mut rng),
+        DType::F16 => TensorData::random::<burn_backend::f16, _, _>(shape, distribution, &mut rng),
+        DType::BF16 => {
+            TensorData::random::<burn_backend::bf16, _, _>(shape, distribution, &mut rng)
+        }
+        DType::I64 => TensorData::random::<i64, _, _>(shape, distribution, &mut rng),
+        DType::U32 => TensorData::random::<u32, _, _>(shape, distribution, &mut rng),
+        DType::U8 => TensorData::random::<u8, _, _>(shape, distribution, &mut rng),
+        other => unimplemented!("DType not supported {dtype:?}"),
+    };
     crate::set_seeded_rng(rng);
     data
 }
@@ -49,7 +61,6 @@ pub fn into_data(tensor: CandleTensor) -> Result<TensorData, ExecutionError> {
     }
 
     match tensor.tensor.dtype() {
-        other => todo!("{other:?} not yet supported"),
         candle_core::DType::BF16 => tensor_data_from_dtype::<bf16>(&tensor),
         candle_core::DType::F16 => tensor_data_from_dtype::<f16>(&tensor),
         candle_core::DType::F32 => tensor_data_from_dtype::<f32>(&tensor),
@@ -59,6 +70,7 @@ pub fn into_data(tensor: CandleTensor) -> Result<TensorData, ExecutionError> {
         candle_core::DType::I16 => tensor_data_from_dtype::<i16>(&tensor),
         candle_core::DType::I32 => tensor_data_from_dtype::<i32>(&tensor),
         candle_core::DType::I64 => tensor_data_from_dtype::<i64>(&tensor),
+        other => todo!("{other:?} not yet supported"),
     }
 }
 

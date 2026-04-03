@@ -1,8 +1,5 @@
 use crate::{CubeRuntime, kernel::utils::address_type, tensor::CubeTensor};
-use crate::{
-    kernel::utils::{linear_view, shape_divmod},
-    ops::numeric::empty_device_dtype,
-};
+use crate::{kernel::utils::shape_divmod, ops::numeric::empty_device_dtype};
 use burn_backend::TensorMetadata;
 use cubecl::{CubeDim, calculate_cube_count_elemwise, std::tensor::layout::linear::LinearView};
 use cubecl::{prelude::*, std::FastDivmod};
@@ -63,20 +60,21 @@ pub(crate) fn select<R: CubeRuntime>(
     let cube_dim = CubeDim::new(&indices.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&indices.client, working_units, cube_dim);
 
+    let (tensor_dtype, indices_dtype) = (tensor.dtype, indices.dtype);
+
     unsafe {
         select_kernel::launch_unchecked(
-            &tensor.client,
+            &output.client,
             cube_count,
             cube_dim,
             address_type!(tensor, indices, output),
-            tensor.as_tensor_arg(1),
-            linear_view(&indices, 1),
-            linear_view(&output, 1),
+            tensor.into_tensor_arg(),
+            indices.into_linear_view(),
+            output.clone().into_linear_view(),
             shape_divmod(&output),
-            ScalarArg::new(dim),
-            [tensor.dtype.into(), indices.dtype.into()],
+            dim,
+            [tensor_dtype.into(), indices_dtype.into()],
         )
-        .expect("Kernel to never fail");
     };
     output
 }

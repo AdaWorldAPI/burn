@@ -1,6 +1,6 @@
 use crate::{
     CubeRuntime,
-    kernel::utils::{address_type, linear_view, shape_divmod},
+    kernel::utils::{address_type, shape_divmod},
     ops::numeric::empty_device_dtype,
     tensor::CubeTensor,
 };
@@ -34,13 +34,14 @@ pub fn slice<R: CubeRuntime>(tensor: CubeTensor<R>, indices: &[Range<usize>]) ->
         && offset_end.is_multiple_of(memory_offset_alignment)
     {
         CubeTensor::new(
-            tensor.client,
+            tensor.client.clone(),
             tensor
                 .handle
+                .clone()
                 .offset_start(offset_start)
                 .offset_end(offset_end),
-            Metadata::new(dims, tensor.meta.strides),
-            tensor.device,
+            Metadata::new(dims, tensor.meta.strides.clone()),
+            tensor.device.clone(),
             tensor.dtype,
         )
     } else {
@@ -97,26 +98,26 @@ pub(crate) fn slice_on_output<R: CubeRuntime>(
 
     for i in 0..ndims {
         let start = indices.get(i).map(|index| index.start).unwrap_or(0);
-        indices_sequence.push(ScalarArg::new(start));
+        indices_sequence.push(start);
     }
 
     let working_units = output.meta.num_elements();
     let cube_dim = CubeDim::new(&tensor.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&tensor.client, working_units, cube_dim);
+    let dtype = tensor.dtype;
 
     unsafe {
         slice_kernel::launch_unchecked(
-            &tensor.client,
+            &output.client,
             cube_count,
             cube_dim,
             address_type!(tensor, output),
-            tensor.as_tensor_arg(1),
-            linear_view(&output, 1),
+            tensor.into_tensor_arg(),
+            output.clone().into_linear_view(),
             shape_divmod(&output),
             indices_sequence,
-            tensor.dtype.into(),
+            dtype.into(),
         )
-        .expect("Kernel to never fail");
     };
 
     output
@@ -202,38 +203,38 @@ pub fn slice_with_steps<R: CubeRuntime>(tensor: CubeTensor<R>, slices: &[Slice])
 
     for (dim, slice) in slices.iter().enumerate() {
         let range = slice.to_range(tensor.meta.shape()[dim]);
-        starts.push(ScalarArg::new(range.start));
-        ends.push(ScalarArg::new(range.end));
-        steps.push(ScalarArg::new(slice.step as i32));
+        starts.push(range.start);
+        ends.push(range.end);
+        steps.push(slice.step as i32);
     }
 
     // Pad with default values if needed to match tensor dimensions
     for dim in slices.len()..tensor.meta.num_dims() {
-        starts.push(ScalarArg::new(0));
-        ends.push(ScalarArg::new(tensor.meta.shape()[dim]));
-        steps.push(ScalarArg::new(1));
+        starts.push(0);
+        ends.push(tensor.meta.shape[dim]);
+        steps.push(1);
     }
 
     // Launch kernel
     let working_units = shape_output.num_elements();
     let cube_dim = CubeDim::new(&tensor.client, working_units);
     let cube_count = calculate_cube_count_elemwise(&tensor.client, working_units, cube_dim);
+    let dtype = tensor.dtype;
 
     unsafe {
         slice_with_steps_kernel::launch_unchecked(
-            &tensor.client,
+            &output.client,
             cube_count,
             cube_dim,
             address_type!(tensor, output),
-            tensor.as_tensor_arg(1),
-            linear_view(&output, 1),
+            tensor.into_tensor_arg(),
+            output.clone().into_linear_view(),
             shape_divmod(&output),
             starts,
             ends,
             steps,
-            tensor.dtype.into(),
-        )
-        .expect("Kernel to never fail");
+            dtype.into(),
+        );
     }
 
     output

@@ -5,7 +5,7 @@ use crate::burnpack::{
     writer::BurnpackWriter,
 };
 use burn_core::module::ParamId;
-use burn_tensor::{DType, TensorData};
+use burn_tensor::{BoolStore, DType, TensorData, shape};
 
 #[test]
 fn test_maximum_metadata_size() {
@@ -182,7 +182,7 @@ fn test_all_supported_dtypes() {
             .concat(),
         ),
         (DType::U8, vec![u8::MIN, u8::MAX]),
-        (DType::Bool, vec![0, 1]),
+        (DType::Bool(BoolStore::Native), vec![0, 1]),
     ];
 
     let mut snapshots = vec![];
@@ -281,7 +281,7 @@ fn test_single_byte_tensor() {
 #[test]
 fn test_high_dimensional_tensor() {
     // Test a tensor with many dimensions (10D)
-    let shape = vec![2, 2, 2, 2, 2, 2, 2, 2, 2, 2]; // 10 dimensions, 1024 elements total
+    let shape = shape![2, 2, 2, 2, 2, 2, 2, 2, 2, 2]; // 10 dimensions, 1024 elements total
     let data = vec![1u8; 1024];
 
     let snapshot = TensorSnapshot::from_data(

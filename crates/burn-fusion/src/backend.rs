@@ -4,7 +4,7 @@ use crate::{
     stream::{Context, OrderedExecution},
 };
 use burn_backend::{
-    Backend, DType, DeviceOps, Element, ExecutionError,
+    Backend, DType, DeviceOps, ExecutionError,
     tensor::{BoolTensor, Device, FloatTensor, IntTensor, QuantizedTensor},
 };
 use burn_ir::{BackendIr, OperationIr, TensorHandle};
@@ -55,11 +55,15 @@ impl<B: FusionBackend> Backend for Fusion<B> {
         B::sync(device)
     }
 
-    fn ad_enabled() -> bool {
+    fn ad_enabled(_device: &Self::Device) -> bool {
         false
     }
 
-    fn memory_persistent_allocations<Output, Input, Func: Fn(Input) -> Output>(
+    fn memory_persistent_allocations<
+        Output: Send,
+        Input: Send,
+        Func: Fn(Input) -> Output + Send,
+    >(
         device: &Self::Device,
         input: Input,
         func: Func,
@@ -84,6 +88,10 @@ impl<B: FusionBackend> Backend for Fusion<B> {
 
     fn dtype_usage(device: &Self::Device, dtype: DType) -> burn_backend::DTypeUsageSet {
         B::dtype_usage(device, dtype)
+    }
+
+    fn device_count(type_id: u16) -> usize {
+        B::device_count(type_id)
     }
 }
 
@@ -180,8 +188,6 @@ pub trait FusionRuntime: Send + Sync + Sized + core::fmt::Debug + 'static {
     type FusionHandle: Clone + Send;
     /// Device used by the runtime.
     type FusionDevice: DeviceOps;
-    /// The type that represents booleans on the backend.
-    type BoolRepr: Element;
 
     /// The list of fusers that will be used to optimize the computational graph.
     fn fusers(device: Self::FusionDevice) -> Vec<Box<dyn OperationFuser<Self::Optimization>>>;

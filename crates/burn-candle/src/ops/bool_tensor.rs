@@ -1,26 +1,27 @@
 use burn_backend::{
-    BackTrace, DType, ExecutionError, Shape, Slice, TensorData, TensorMetadata,
+    BackTrace, DType, ExecutionError, Scalar, Shape, Slice, TensorData, TensorMetadata,
     ops::BoolTensorOps,
-    tensor::{BoolElem, BoolTensor, Device, FloatTensor, IntTensor},
+    tensor::{BoolTensor, Device, FloatTensor, IntTensor},
 };
+use burn_std::{BoolDType, FloatDType, IntDType};
 
 use crate::{
-    Candle, CandleTensor,
+    Candle, CandleTensor, IntoDType,
     element::{CandleElement, FloatCandleElement, IntCandleElement},
 };
 
 use super::base::{expand, permute, unfold};
 
 impl<F: FloatCandleElement, I: IntCandleElement> BoolTensorOps<Self> for Candle<F, I> {
-    fn bool_empty(shape: Shape, device: &Device<Self>) -> BoolTensor<Self> {
+    fn bool_empty(shape: Shape, device: &Device<Self>, _dtype: BoolDType) -> BoolTensor<Self> {
         super::base::empty(shape, device, candle_core::DType::U8)
     }
 
-    fn bool_zeros(shape: Shape, device: &Device<Self>) -> BoolTensor<Self> {
+    fn bool_zeros(shape: Shape, device: &Device<Self>, _dtype: BoolDType) -> BoolTensor<Self> {
         super::base::zeros(shape, device, candle_core::DType::U8)
     }
 
-    fn bool_ones(shape: Shape, device: &Device<Self>) -> BoolTensor<Self> {
+    fn bool_ones(shape: Shape, device: &Device<Self>, _dtype: BoolDType) -> BoolTensor<Self> {
         super::base::ones(shape, device, candle_core::DType::U8)
     }
 
@@ -50,12 +51,12 @@ impl<F: FloatCandleElement, I: IntCandleElement> BoolTensorOps<Self> for Candle<
         }
     }
 
-    fn bool_into_int(tensor: BoolTensor<Self>) -> IntTensor<Self> {
-        CandleTensor::new(tensor.tensor.to_dtype(I::DTYPE).unwrap())
+    fn bool_into_int(tensor: BoolTensor<Self>, out_dtype: IntDType) -> IntTensor<Self> {
+        CandleTensor::new(tensor.tensor.to_dtype(out_dtype.into_dtype()).unwrap())
     }
 
-    fn bool_into_float(tensor: BoolTensor<Self>) -> FloatTensor<Self> {
-        CandleTensor::new(tensor.tensor.to_dtype(F::DTYPE).unwrap())
+    fn bool_into_float(tensor: BoolTensor<Self>, out_dtype: FloatDType) -> FloatTensor<Self> {
+        CandleTensor::new(tensor.tensor.to_dtype(out_dtype.into_dtype()).unwrap())
     }
 
     fn bool_device(tensor: &BoolTensor<Self>) -> Device<Self> {
@@ -170,12 +171,12 @@ impl<F: FloatCandleElement, I: IntCandleElement> BoolTensorOps<Self> for Candle<
     fn bool_mask_fill(
         tensor: BoolTensor<Self>,
         mask: BoolTensor<Self>,
-        value: BoolElem<Self>,
+        value: Scalar,
     ) -> BoolTensor<Self> {
         CandleTensor::new(
             mask.tensor
                 .where_cond(
-                    &super::candle_utils::fill_like::<u8>(value, &tensor.tensor),
+                    &super::candle_utils::fill_like::<u8>(value.elem(), &tensor.tensor),
                     &tensor.tensor,
                 )
                 .unwrap(),
@@ -206,7 +207,7 @@ impl<F: FloatCandleElement, I: IntCandleElement> BoolTensorOps<Self> for Candle<
         )
     }
 
-    fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: BoolElem<Self>) -> BoolTensor<Self> {
-        CandleTensor::new(lhs.tensor.eq(rhs).unwrap())
+    fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+        CandleTensor::new(lhs.tensor.eq(rhs.elem::<u8>()).unwrap())
     }
 }

@@ -112,7 +112,6 @@
 //!   - `std`: Activates the standard library (deactivate for no_std)
 //!   - `server`: Enables the remote server.
 //!   - `network`: Enables network utilities (currently, only a file downloader with progress bar)
-//!   - `experimental-named-tensor`: Enables named tensors (experimental)
 //!
 //! You can also check the details in sub-crates [`burn-core`](https://docs.rs/burn-core) and [`burn-train`](https://docs.rs/burn-train).
 
@@ -167,6 +166,9 @@ pub mod lr_scheduler {
 pub mod grad_clipping {
     pub use burn_optim::grad_clipping::*;
 }
+
+#[cfg(feature = "dispatch")]
+pub use burn_dispatch::*;
 
 /// CubeCL module re-export.
 #[cfg(feature = "cubecl")]

@@ -1,19 +1,22 @@
 // Language
 use alloc::vec;
 use alloc::vec::Vec;
-use burn_backend::tensor::BoolElem;
+use burn_backend::Scalar;
 use burn_backend::{ElementConversion, TensorMetadata, tensor::FloatTensor};
 use burn_backend::{
     backend::ExecutionError,
     ops::BoolTensorOps,
     tensor::{BoolTensor, IntTensor},
 };
+use burn_std::{BoolDType, FloatDType, IntDType};
 use ndarray::IntoDimension;
 
 // Current crate
 use crate::element::{FloatNdArrayElement, IntNdArrayElement, QuantElement};
 use crate::{NdArray, execute_with_int_dtype, tensor::NdArrayTensor};
-use crate::{NdArrayDevice, SharedArray, slice};
+use crate::{
+    NdArrayDevice, SharedArray, execute_with_float_out_dtype, execute_with_int_out_dtype, slice,
+};
 
 // Workspace crates
 use burn_backend::{Shape, TensorData, backend::Backend};
@@ -49,26 +52,41 @@ where
         slice!(tensor, slices)
     }
 
-    fn bool_into_int(tensor: NdArrayTensor) -> NdArrayTensor {
+    fn bool_into_int(tensor: NdArrayTensor, out_dtype: IntDType) -> NdArrayTensor {
         // Use mapv directly instead of collecting to Vec and going through TensorData
-        let int_array: SharedArray<I> = tensor.bool().mapv(|b| b.elem()).into_shared();
-        int_array.into()
+        execute_with_int_out_dtype!(
+            out_dtype,
+            I,
+            tensor.bool().mapv(|b| b.elem::<I>()).into_shared().into()
+        )
     }
 
     fn bool_device(_tensor: &NdArrayTensor) -> <NdArray<E> as Backend>::Device {
         NdArrayDevice::Cpu
     }
 
-    fn bool_empty(shape: Shape, _device: &<NdArray<E> as Backend>::Device) -> NdArrayTensor {
-        Self::bool_zeros(shape, _device)
+    fn bool_empty(
+        shape: Shape,
+        _device: &<NdArray<E> as Backend>::Device,
+        dtype: BoolDType,
+    ) -> NdArrayTensor {
+        Self::bool_zeros(shape, _device, dtype)
     }
 
-    fn bool_zeros(shape: Shape, _device: &<NdArray<E> as Backend>::Device) -> NdArrayTensor {
+    fn bool_zeros(
+        shape: Shape,
+        _device: &<NdArray<E> as Backend>::Device,
+        _dtype: BoolDType,
+    ) -> NdArrayTensor {
         let values = vec![false; shape.num_elements()];
         NdArrayTensor::from_data(TensorData::new(values, shape))
     }
 
-    fn bool_ones(shape: Shape, _device: &<NdArray<E> as Backend>::Device) -> NdArrayTensor {
+    fn bool_ones(
+        shape: Shape,
+        _device: &<NdArray<E> as Backend>::Device,
+        _dtype: BoolDType,
+    ) -> NdArrayTensor {
         let values = vec![true; shape.num_elements()];
         NdArrayTensor::from_data(TensorData::new(values, shape))
     }
@@ -101,9 +119,12 @@ where
         NdArrayBoolOps::or(lhs.bool(), rhs.bool()).into()
     }
 
-    fn bool_into_float(tensor: NdArrayTensor) -> FloatTensor<Self> {
-        let arr: SharedArray<E> = tensor.bool().mapv(|b| b.elem()).into_shared();
-        arr.into()
+    fn bool_into_float(tensor: NdArrayTensor, out_dtype: FloatDType) -> FloatTensor<Self> {
+        execute_with_float_out_dtype!(
+            out_dtype,
+            E,
+            tensor.bool().mapv(|b| b.elem::<E>()).into_shared().into()
+        )
     }
 
     fn bool_swap_dims(tensor: NdArrayTensor, dim1: usize, dim2: usize) -> NdArrayTensor {
@@ -171,7 +192,7 @@ where
     fn bool_mask_fill(
         tensor: BoolTensor<Self>,
         mask: BoolTensor<Self>,
-        value: BoolElem<Self>,
+        value: Scalar,
     ) -> BoolTensor<Self> {
         NdArrayOps::mask_fill(tensor.bool(), mask.bool(), value.elem()).into()
     }
@@ -202,8 +223,8 @@ where
         ))
     }
 
-    fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: BoolElem<Self>) -> BoolTensor<Self> {
-        NdArrayBoolOps::equal_elem(lhs.bool(), rhs).into()
+    fn bool_equal_elem(lhs: BoolTensor<Self>, rhs: Scalar) -> BoolTensor<Self> {
+        NdArrayBoolOps::equal_elem(lhs.bool(), rhs.elem()).into()
     }
 
     fn bool_any(tensor: BoolTensor<Self>) -> BoolTensor<Self> {
