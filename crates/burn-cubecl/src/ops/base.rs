@@ -66,7 +66,7 @@ pub(crate) fn to_device<R: CubeRuntime>(
         return tensor;
     }
 
-    let tensor = kernel::into_contiguous_aligned(tensor);
+    let mut tensor = kernel::into_contiguous_aligned(tensor);
     let client = R::client(device);
     tensor.to_client(client, device.clone())
 }
@@ -326,14 +326,6 @@ pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> Cub
                 );
             }
 
-            if matches!(
-                scheme.value,
-                QuantValue::Q4S | QuantValue::Q4F | QuantValue::Q2S | QuantValue::Q2F
-            ) {
-                // FIXME
-                todo!("Reshape with sub-byte values is not supported")
-            }
-
             shape[packed_d] = shape[packed_d].div_ceil(num_quants);
             shape
         }
@@ -350,6 +342,16 @@ pub fn q_reshape<R: CubeRuntime>(mut tensor: CubeTensor<R>, shape: Shape) -> Cub
 
     let n_new_dims = shape.num_dims().saturating_sub(curr_shape.num_dims());
     let is_unsqueeze = n_new_dims > 0 && shape[n_new_dims..] == **curr_shape;
+
+    if !is_unsqueeze
+        && matches!(
+            scheme.value,
+            QuantValue::Q4S | QuantValue::Q4F | QuantValue::Q2S | QuantValue::Q2F
+        )
+    {
+        // FIXME
+        todo!("Reshape with sub-byte values is not supported")
+    }
 
     // Check valid reshapes
     if let ReshapeAction::UpdateStrides { .. } = &action_values {

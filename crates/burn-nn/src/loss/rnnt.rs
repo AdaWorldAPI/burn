@@ -1,4 +1,5 @@
 use super::Reduction;
+use alloc::vec;
 use burn::config::Config;
 use burn::module::Module;
 use burn::tensor::{Bool, Int, Tensor, backend::Backend, s};
@@ -93,7 +94,7 @@ impl RNNTLoss {
             alpha = alpha.mask_where(valid, new);
         }
 
-        self.gather_loss(alpha, &lpb, logit_lengths, target_lengths, b, max_up1)
+        self.gather_loss(alpha, &lpb, logit_lengths, target_lengths, b)
     }
 
     /// Computes RNNT loss with the given reduction. Returns shape `[1]`.
@@ -232,19 +233,21 @@ impl RNNTLoss {
         logit_lengths: Tensor<B, 1, Int>,
         target_lengths: Tensor<B, 1, Int>,
         b: usize,
-        max_up1: usize,
     ) -> Tensor<B, 1> {
-        let t_idx = logit_lengths.sub_scalar(1);
+        let device = alpha.device();
+        // Anchor the index dtype on `u_idx` so all three coordinate tensors share a
+        // common int dtype before stacking - `cat` panics on dtype mismatch and the
+        // caller's lengths may not use the device's default IntElem.
         let u_idx = target_lengths;
+        let int_dtype = u_idx.dtype();
+        let t_idx = logit_lengths.sub_scalar(1).cast(int_dtype);
+        let b_idx = Tensor::<B, 1, Int>::arange(0..b as i64, (&device, int_dtype));
 
-        let alpha_tu = alpha
-            .gather(1, u_idx.clone().reshape([b, 1]))
-            .squeeze_dim::<1>(1);
-
-        // Gather blank prob at (T_b, U_b)
-        let t_exp = t_idx.reshape([b, 1, 1]).expand([b, 1, max_up1]);
-        let lpb_t = lpb.clone().gather(1, t_exp).squeeze_dim::<2>(1);
-        let lpb_tu = lpb_t.gather(1, u_idx.reshape([b, 1])).squeeze_dim::<1>(1);
+        let alpha_tu: Tensor<B, 1> =
+            alpha.gather_nd(Tensor::stack::<2>(vec![b_idx.clone(), u_idx.clone()], 1));
+        let lpb_tu: Tensor<B, 1> = lpb
+            .clone()
+            .gather_nd(Tensor::stack::<2>(vec![b_idx, t_idx, u_idx], 1));
 
         alpha_tu.add(lpb_tu).neg()
     }
@@ -321,9 +324,9 @@ impl RNNTLoss {
 mod tests {
     use super::*;
     use burn::tensor::{TensorData, Tolerance};
-    use burn_ndarray::{NdArray, NdArrayDevice};
+    use burn_flex::{Flex, FlexDevice};
 
-    type B = NdArray<f32>;
+    type B = Flex;
     const NUM_LABELS: usize = 2; // vocab size for simple unit tests
 
     #[test]
@@ -336,11 +339,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "blank index")]
     fn panics_on_invalid_blank() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().with_blank(5).init();
         rnnt.forward(
             Tensor::<B, 4>::zeros([1, 2, 2, 3], &dev),
-            Tensor::<B, 2, Int>::from_data([[1_i64]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32]], &dev),
             Tensor::<B, 1, Int>::from_data([2], &dev),
             Tensor::<B, 1, Int>::from_data([1], &dev),
         );
@@ -349,11 +352,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "must equal batch_size")]
     fn panics_on_batch_mismatch() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         rnnt.forward(
             Tensor::<B, 4>::zeros([2, 3, 2, 3], &dev),
-            Tensor::<B, 2, Int>::from_data([[1_i64]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32]], &dev),
             Tensor::<B, 1, Int>::from_data([3, 3], &dev),
             Tensor::<B, 1, Int>::from_data([1, 1], &dev),
         );
@@ -362,11 +365,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "logit_lengths length")]
     fn panics_on_logit_lengths_mismatch() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         rnnt.forward(
             Tensor::<B, 4>::zeros([2, 3, 2, 3], &dev),
-            Tensor::<B, 2, Int>::from_data([[1_i64], [2]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32], [2]], &dev),
             Tensor::<B, 1, Int>::from_data([3], &dev),
             Tensor::<B, 1, Int>::from_data([1, 1], &dev),
         );
@@ -375,11 +378,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "target_lengths length")]
     fn panics_on_target_lengths_mismatch() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         rnnt.forward(
             Tensor::<B, 4>::zeros([2, 3, 2, 3], &dev),
-            Tensor::<B, 2, Int>::from_data([[1_i64], [2]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32], [2]], &dev),
             Tensor::<B, 1, Int>::from_data([3, 3], &dev),
             Tensor::<B, 1, Int>::from_data([1], &dev),
         );
@@ -392,7 +395,7 @@ mod tests {
         // Two alignment paths (label emitted at t=0 or t=1), each with T+U emissions:
         //   total_prob = T * (1/V)^(T+1) = 2 * (1/2)^3 = 1/4
         //   loss = -ln(1/4) = 2*ln(2)
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().with_logits(false).init();
         let time_steps = 2;
         let target_len = 1;
@@ -405,7 +408,7 @@ mod tests {
                 log_uniform,
                 &dev,
             ),
-            Tensor::<B, 2, Int>::from_data([[1_i64]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32]], &dev),
             Tensor::<B, 1, Int>::from_data([time_steps as i64], &dev),
             Tensor::<B, 1, Int>::from_data([target_len as i64], &dev),
         );
@@ -427,7 +430,7 @@ mod tests {
         // Single path with T emissions (T-1 blanks + 1 final blank, all at u=0):
         //   total_prob = (1/V)^T = (1/2)^3 = 1/8
         //   loss = T*ln(V) = 3*ln(2)
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().with_logits(false).init();
         let time_steps = 3;
         let target_len = 0;
@@ -436,7 +439,7 @@ mod tests {
 
         let loss = rnnt.forward(
             Tensor::<B, 4>::full([1, time_steps, 2, NUM_LABELS], log_uniform, &dev),
-            Tensor::<B, 2, Int>::from_data([[1_i64]], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32]], &dev),
             Tensor::<B, 1, Int>::from_data([time_steps as i64], &dev),
             Tensor::<B, 1, Int>::from_data([target_len as i64], &dev),
         );
@@ -452,7 +455,7 @@ mod tests {
     fn logits_equivalence() {
         // Verify that logits=true (internal log_softmax on raw logits)
         // gives the same loss as logits=false with external log_softmax.
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let [bs, time_steps, up1, vocab] = [1, 2, 3, 4];
         let num_elements = bs * time_steps * up1 * vocab;
         let target_len = up1 - 1;
@@ -462,7 +465,7 @@ mod tests {
             burn_core::tensor::TensorData::new(data, [bs, time_steps, up1, vocab]),
             &dev,
         );
-        let targets = Tensor::<B, 2, Int>::from_data([[1_i64, 2]], &dev);
+        let targets = Tensor::<B, 2, Int>::from_data([[1_i32, 2]], &dev);
         let logit_lengths = Tensor::<B, 1, Int>::from_data([time_steps as i64], &dev);
         let target_lengths = Tensor::<B, 1, Int>::from_data([target_len as i64], &dev);
 
@@ -498,16 +501,16 @@ mod pytorch_comparison_tests {
     use super::*;
     use burn::tensor::{TensorData, Tolerance};
     use burn_autodiff::Autodiff;
-    use burn_ndarray::{NdArray, NdArrayDevice};
+    use burn_flex::{Flex, FlexDevice};
 
-    type B = Autodiff<NdArray<f32>>;
+    type B = Autodiff<Flex>;
     fn tol() -> Tolerance<f32> {
         Tolerance::absolute(1e-3)
     }
 
     /// Deterministic logits matching the Python reference generator.
     /// Uses coprime coefficients to avoid repeating patterns across dimensions.
-    fn make_logits(bs: usize, t: usize, u: usize, v: usize, dev: &NdArrayDevice) -> Tensor<B, 4> {
+    fn make_logits(bs: usize, t: usize, u: usize, v: usize, dev: &FlexDevice) -> Tensor<B, 4> {
         let mut data = Vec::with_capacity(bs * t * u * v);
         for bi in 0..bs {
             for ti in 0..t {
@@ -570,15 +573,15 @@ mod pytorch_comparison_tests {
     #[test]
     fn basic_b1() {
         // B=1, T=4, U+1=3, V=3, targets=[1,2]
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         let logits = make_logits(1, 4, 3, 3, &dev).require_grad();
 
         let loss = rnnt.forward(
             logits.clone(),
-            Tensor::<B, 2, Int>::from_data([[1_i64, 2]], &dev),
-            Tensor::<B, 1, Int>::from_data([4_i64], &dev),
-            Tensor::<B, 1, Int>::from_data([2_i64], &dev),
+            Tensor::<B, 2, Int>::from_data([[1_i32, 2]], &dev),
+            Tensor::<B, 1, Int>::from_data([4_i32], &dev),
+            Tensor::<B, 1, Int>::from_data([2_i32], &dev),
         );
         loss.clone()
             .into_data()
@@ -602,18 +605,18 @@ mod pytorch_comparison_tests {
     #[test]
     fn batched_b2() {
         // B=2, T=5, U+1=4, V=4, targets=[[1,2,3],[2,1,3]]
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         let logits = make_logits(2, 5, 4, 4, &dev).require_grad();
 
         let loss = rnnt.forward(
             logits.clone(),
             Tensor::<B, 2, Int>::from_data(
-                TensorData::new(vec![1_i64, 2, 3, 2, 1, 3], [2, 3]),
+                TensorData::new(vec![1_i32, 2, 3, 2, 1, 3], [2, 3]),
                 &dev,
             ),
-            Tensor::<B, 1, Int>::from_data([5_i64, 5], &dev),
-            Tensor::<B, 1, Int>::from_data([3_i64, 3], &dev),
+            Tensor::<B, 1, Int>::from_data([5_i32, 5], &dev),
+            Tensor::<B, 1, Int>::from_data([3_i32, 3], &dev),
         );
         loss.clone()
             .into_data()
@@ -640,18 +643,18 @@ mod pytorch_comparison_tests {
         // B=3, T=6, U+1=4, V=5
         // logit_lengths=[6,4,5], target_lengths=[3,2,1]
         // Tests that masking works correctly for variable-length sequences.
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         let logits = make_logits(3, 6, 4, 5, &dev).require_grad();
 
         let loss = rnnt.forward(
             logits.clone(),
             Tensor::<B, 2, Int>::from_data(
-                TensorData::new(vec![1_i64, 2, 3, 4, 1, 0, 2, 0, 0], [3, 3]),
+                TensorData::new(vec![1_i32, 2, 3, 4, 1, 0, 2, 0, 0], [3, 3]),
                 &dev,
             ),
-            Tensor::<B, 1, Int>::from_data([6_i64, 4, 5], &dev),
-            Tensor::<B, 1, Int>::from_data([3_i64, 2, 1], &dev),
+            Tensor::<B, 1, Int>::from_data([6_i32, 4, 5], &dev),
+            Tensor::<B, 1, Int>::from_data([3_i32, 2, 1], &dev),
         );
         loss.clone()
             .into_data()
@@ -732,15 +735,15 @@ mod pytorch_comparison_tests {
 
     #[test]
     fn sum_reduction() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         let logits = make_logits(2, 5, 4, 4, &dev).require_grad();
         let tgt = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(vec![1_i64, 2, 3, 2, 1, 3], [2, 3]),
+            TensorData::new(vec![1_i32, 2, 3, 2, 1, 3], [2, 3]),
             &dev,
         );
-        let il = Tensor::<B, 1, Int>::from_data([5_i64, 5], &dev);
-        let tl = Tensor::<B, 1, Int>::from_data([3_i64, 3], &dev);
+        let il = Tensor::<B, 1, Int>::from_data([5_i32, 5], &dev);
+        let tl = Tensor::<B, 1, Int>::from_data([3_i32, 3], &dev);
 
         let loss = rnnt.forward_with_reduction(logits.clone(), tgt, il, tl, Reduction::Sum);
         // 7.9356 + 7.2033 = 15.1389
@@ -763,15 +766,15 @@ mod pytorch_comparison_tests {
 
     #[test]
     fn mean_reduction() {
-        let dev = NdArrayDevice::Cpu;
+        let dev = FlexDevice;
         let rnnt = RNNTLossConfig::new().init();
         let logits = make_logits(2, 5, 4, 4, &dev).require_grad();
         let tgt = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(vec![1_i64, 2, 3, 2, 1, 3], [2, 3]),
+            TensorData::new(vec![1_i32, 2, 3, 2, 1, 3], [2, 3]),
             &dev,
         );
-        let il = Tensor::<B, 1, Int>::from_data([5_i64, 5], &dev);
-        let tl = Tensor::<B, 1, Int>::from_data([3_i64, 3], &dev);
+        let il = Tensor::<B, 1, Int>::from_data([5_i32, 5], &dev);
+        let tl = Tensor::<B, 1, Int>::from_data([3_i32, 3], &dev);
 
         let loss = rnnt.forward_with_reduction(logits.clone(), tgt, il, tl, Reduction::Mean);
         // 15.1389 / 2 = 7.5694

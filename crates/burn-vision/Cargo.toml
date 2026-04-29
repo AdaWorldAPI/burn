@@ -19,13 +19,12 @@ workspace = true
 
 
 [features]
-default = ["ndarray", "cubecl-backend", "fusion", "std"]
-std = ["aligned-vec/std"]
+default = ["flex", "cubecl-backend", "fusion", "std"]
+std = ["aligned-vec/std", "burn-store?/std", "burn-std?/std"]
 tracing = [
     "burn-cubecl?/tracing",
     "burn-fusion?/tracing",
     "burn-ir/tracing",
-    "burn-ndarray?/tracing",
     "burn-tch?/tracing",
     "burn-tensor/tracing",
     "cubecl/tracing",
@@ -33,8 +32,11 @@ tracing = [
 
 cubecl-backend = ["cubecl", "burn-cubecl"]
 fusion = ["burn-fusion", "burn-cuda/fusion", "burn-wgpu/fusion"]
-ndarray = ["burn-ndarray"]
+flex = ["burn-flex"]
 tch = ["burn-tch"]
+
+# TODO: move somewhere else
+loss = ["std", "burn-store/pytorch", "burn-std/network", "dirs"]
 
 # Test features
 test-cpu = []
@@ -44,15 +46,21 @@ test-vulkan = ["burn-wgpu/vulkan", "test-wgpu"]
 test-metal = ["burn-wgpu/metal", "test-wgpu"]
 
 [dependencies]
-aligned-vec = { version = "0.6", default-features = false }
+aligned-vec = { workspace = true }
 bon = { workspace = true }
-burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.2", optional = true }
-burn-fusion = { path = "../burn-fusion", version = "=0.21.0-pre.2", optional = true }
-burn-ir = { path = "../burn-ir", version = "=0.21.0-pre.2" }
-burn-ndarray = { path = "../burn-ndarray", version = "=0.21.0-pre.2", optional = true }
-burn-tch = { path = "../burn-tch", version = "=0.21.0-pre.2", optional = true }
-burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.2" }
-burn-tensor-testgen = { path = "../burn-tensor-testgen", version = "=0.21.0-pre.2", optional = true }
+burn-cubecl = { workspace = true, optional = true, features = ["default"] }
+burn-fusion = { workspace = true, optional = true, features = ["default"] }
+burn-flex = { workspace = true, optional = true, features = ["default"] }
+burn-ir = { workspace = true, features = ["default"] }
+burn-tch = { workspace = true, optional = true, features = ["default"] }
+burn-tensor = { workspace = true, features = ["default"] }
+burn-tensor-testgen = { workspace = true, optional = true }
+
+# For loss functions requiring pretrained models (e.g., Gram Matrix Loss)
+burn-store = { workspace = true, optional = true }
+burn-std = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+
 bytemuck = { workspace = true }
 cubecl = { workspace = true, optional = true }
 derive-new = { workspace = true }
@@ -65,7 +73,7 @@ paste = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-burn-cuda = { path = "../burn-cuda", version = "=0.21.0-pre.2", default-features = false }
-burn-ndarray = { path = "../burn-ndarray", version = "=0.21.0-pre.2" }
-burn-wgpu = { path = "../burn-wgpu", version = "=0.21.0-pre.2", default-features = false }
+burn-cuda = { workspace = true }
+burn-flex = { workspace = true, features = ["default"] }
+burn-wgpu = { workspace = true }
 cubecl = { workspace = true }

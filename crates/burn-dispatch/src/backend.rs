@@ -3,7 +3,8 @@ use alloc::format;
 use alloc::string::String;
 
 use burn_backend::quantization::QuantScheme;
-use burn_backend::{Backend, DType, ExecutionError, QTensorPrimitive};
+use burn_backend::tensor::{Device, QuantizedTensor};
+use burn_backend::{Backend, BackendTypes, DType, ExecutionError, QTensorPrimitive};
 
 #[cfg(feature = "autodiff")]
 use burn_autodiff::grads::Gradients;
@@ -43,7 +44,7 @@ use crate::{DispatchDevice, DispatchTensor};
 #[derive(Debug, Default, Clone)]
 pub struct Dispatch;
 
-impl Backend for Dispatch {
+impl BackendTypes for Dispatch {
     type Device = DispatchDevice;
 
     type FloatTensorPrimitive = DispatchTensor;
@@ -60,7 +61,9 @@ impl Backend for Dispatch {
     type BoolElem = u8;
 
     type QuantizedTensorPrimitive = DispatchTensor;
+}
 
+impl Backend for Dispatch {
     fn name(device: &Self::Device) -> String {
         let inner = dispatch_device!(device, |device| B::name(device));
         format!("dispatch<{inner}>")
@@ -101,6 +104,8 @@ impl Backend for Dispatch {
             BackendId::Vulkan => Vulkan::<f32>::device_count(backend_type_id),
             #[cfg(wgpu_webgpu)]
             BackendId::Wgpu => Wgpu::<f32>::device_count(backend_type_id),
+            #[cfg(feature = "flex")]
+            BackendId::Flex => Flex::device_count(backend_type_id),
             #[cfg(feature = "ndarray")]
             BackendId::NdArray => NdArray::<f32>::device_count(backend_type_id),
             #[cfg(feature = "tch")]
@@ -132,6 +137,8 @@ impl AutodiffBackend for Dispatch {
                 DispatchTensorKind::Vulkan(tensor) => tensor.autodiff().backward(),
                 #[cfg(wgpu_webgpu)]
                 DispatchTensorKind::Wgpu(tensor) => tensor.autodiff().backward(),
+                #[cfg(feature = "flex")]
+                DispatchTensorKind::Flex(tensor) => tensor.autodiff().backward(),
                 #[cfg(feature = "ndarray")]
                 DispatchTensorKind::NdArray(tensor) => tensor.autodiff().backward(),
                 #[cfg(feature = "tch")]
@@ -182,6 +189,11 @@ impl AutodiffBackend for Dispatch {
                     .as_autodiff()
                     .grad(grads)
                     .map(|t| DispatchTensorKind::Wgpu(crate::BackendTensor::Float(t))),
+                #[cfg(feature = "flex")]
+                DispatchTensorKind::Flex(tensor) => tensor
+                    .as_autodiff()
+                    .grad(grads)
+                    .map(|t| DispatchTensorKind::Flex(crate::BackendTensor::Float(t))),
                 #[cfg(feature = "ndarray")]
                 DispatchTensorKind::NdArray(tensor) => tensor
                     .as_autodiff()
@@ -242,6 +254,11 @@ impl AutodiffBackend for Dispatch {
                     .as_autodiff()
                     .grad_remove(grads)
                     .map(|t| DispatchTensorKind::Wgpu(crate::BackendTensor::Float(t))),
+                #[cfg(feature = "flex")]
+                DispatchTensorKind::Flex(tensor) => tensor
+                    .as_autodiff()
+                    .grad_remove(grads)
+                    .map(|t| DispatchTensorKind::Flex(crate::BackendTensor::Float(t))),
                 #[cfg(feature = "ndarray")]
                 DispatchTensorKind::NdArray(tensor) => tensor
                     .as_autodiff()
@@ -302,6 +319,10 @@ impl AutodiffBackend for Dispatch {
                 (DispatchTensorKind::Wgpu(tensor), DispatchTensorKind::Wgpu(grad)) => {
                     tensor.as_autodiff().grad_replace(grads, grad.float())
                 }
+                #[cfg(feature = "flex")]
+                (DispatchTensorKind::Flex(tensor), DispatchTensorKind::Flex(grad)) => {
+                    tensor.as_autodiff().grad_replace(grads, grad.float())
+                }
                 #[cfg(feature = "ndarray")]
                 (DispatchTensorKind::NdArray(tensor), DispatchTensorKind::NdArray(grad)) => {
                     tensor.as_autodiff().grad_replace(grads, grad.float())
@@ -348,6 +369,10 @@ impl AutodiffBackend for Dispatch {
                 ),
                 #[cfg(wgpu_webgpu)]
                 DispatchTensorKind::Wgpu(tensor) => DispatchTensorKind::Wgpu(
+                    crate::BackendTensor::Float(tensor.autodiff().primitive),
+                ),
+                #[cfg(feature = "flex")]
+                DispatchTensorKind::Flex(tensor) => DispatchTensorKind::Flex(
                     crate::BackendTensor::Float(tensor.autodiff().primitive),
                 ),
                 #[cfg(feature = "ndarray")]
@@ -425,6 +450,12 @@ impl AutodiffBackend for Dispatch {
                     Autodiff::<Wgpu<f32>>::from_inner(tensor.float()),
                 )),
             )),
+            #[cfg(feature = "flex")]
+            DispatchTensorKind::Flex(tensor) => {
+                DispatchTensorKind::Autodiff(Box::new(DispatchTensorKind::Flex(
+                    crate::BackendTensor::Autodiff(Autodiff::<Flex>::from_inner(tensor.float())),
+                )))
+            }
             #[cfg(feature = "ndarray")]
             DispatchTensorKind::NdArray(tensor) => DispatchTensorKind::Autodiff(Box::new(
                 DispatchTensorKind::NdArray(crate::BackendTensor::Autodiff(
@@ -477,6 +508,8 @@ impl DispatchTensorKind {
             DispatchTensorKind::Vulkan(tensor) => DispatchDevice::Vulkan(tensor.device()),
             #[cfg(wgpu_webgpu)]
             DispatchTensorKind::Wgpu(tensor) => DispatchDevice::Wgpu(tensor.device()),
+            #[cfg(feature = "flex")]
+            DispatchTensorKind::Flex(tensor) => DispatchDevice::Flex(tensor.device()),
             #[cfg(feature = "ndarray")]
             DispatchTensorKind::NdArray(tensor) => DispatchDevice::NdArray(tensor.device()),
             #[cfg(feature = "tch")]
@@ -505,39 +538,41 @@ impl Dispatch {
     /// Returns the default tensor quantization scheme for the device.
     // TODO: replace this + QTensorPrimitive trait method with better API.
     // This is temporary, for test purposes.
-    pub fn default_quant_scheme(device: &<Self as Backend>::Device) -> QuantScheme {
+    pub fn default_quant_scheme(device: &Device<Self>) -> QuantScheme {
         match device {
             #[cfg(feature = "cpu")]
-            DispatchDevice::Cpu(_) => {
-                <<Cpu as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
-            }
+            DispatchDevice::Cpu(_) => <QuantizedTensor<Cpu> as QTensorPrimitive>::default_scheme(),
             #[cfg(feature = "cuda")]
             DispatchDevice::Cuda(_) => {
-                <<Cuda as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<Cuda> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(wgpu_metal)]
             DispatchDevice::Metal(_) => {
-                <<Metal as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<Metal> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(feature = "rocm")]
             DispatchDevice::Rocm(_) => {
-                <<Rocm as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<Rocm> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(wgpu_vulkan)]
             DispatchDevice::Vulkan(_) => {
-                <<Vulkan as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<Vulkan> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(wgpu_webgpu)]
             DispatchDevice::Wgpu(_) => {
-                <<Wgpu as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<Wgpu> as QTensorPrimitive>::default_scheme()
+            }
+            #[cfg(feature = "flex")]
+            DispatchDevice::Flex(_) => {
+                <QuantizedTensor<Flex> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(feature = "ndarray")]
             DispatchDevice::NdArray(_) => {
-                <<NdArray as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<NdArray> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(feature = "tch")]
             DispatchDevice::LibTorch(_) => {
-                <<LibTorch as Backend>::QuantizedTensorPrimitive as QTensorPrimitive>::default_scheme()
+                <QuantizedTensor<LibTorch> as QTensorPrimitive>::default_scheme()
             }
             #[cfg(feature = "autodiff")]
             DispatchDevice::Autodiff(ad_device) => Self::default_quant_scheme(&ad_device.inner),

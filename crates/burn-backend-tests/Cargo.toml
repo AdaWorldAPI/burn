@@ -26,6 +26,7 @@ std = ["burn-tensor/std", "burn-dispatch/std"]
 
 # Backends
 cuda = ["burn-dispatch/cuda", "quantization", "cube"]
+flex = ["burn-dispatch/flex", "quantization"]
 rocm = ["burn-dispatch/rocm", "quantization", "cube"]
 ndarray = ["burn-dispatch/ndarray", "quantization"]
 tch = ["burn-dispatch/tch"]
@@ -38,6 +39,10 @@ cpu = ["burn-dispatch/cpu", "cube"]
 autotune = ["burn-dispatch/autotune"]
 autotune-checks = ["burn-dispatch/autotune-checks"]
 fusion = ["burn-dispatch/fusion"]
+distributed = [
+    "std",
+    "burn-dispatch/distributed"
+]
 
 # CubeCL backends
 cube = [
@@ -53,9 +58,9 @@ cube = [
 quantization = []
 
 [dependencies]
-burn-tensor = { path = "../burn-tensor", version = "=0.21.0-pre.2", default-features = false }
-burn-tensor-testgen = { path = "../burn-tensor-testgen", version = "=0.21.0-pre.2" }
-burn-dispatch = { path = "../burn-dispatch", version = "=0.21.0-pre.2", default-features = false, features = [
+burn-tensor = { workspace = true }
+burn-tensor-testgen = { workspace = true }
+burn-dispatch = { workspace = true, features = [
     "autodiff",
 ] }
 
@@ -63,22 +68,113 @@ burn-dispatch = { path = "../burn-dispatch", version = "=0.21.0-pre.2", default-
 cubek = { workspace = true, features = ["random"], optional = true }
 
 # Explicitly enable test-only checks
-burn-autodiff = { path = "../burn-autodiff", version = "=0.21.0-pre.2", default-features = false, features = [
+burn-autodiff = { workspace = true, features = [
     "export_tests",
 ] }
-burn-ndarray = { path = "../burn-ndarray", version = "=0.21.0-pre.2", optional = true, default-features = false, features = [
+burn-ndarray = { workspace = true, optional = true, features = [
     "export_tests",
 ] }
 
 # Manually enable so running the tests again with fusion feature doesn't have to compile other crates
-burn-cubecl = { path = "../burn-cubecl", version = "=0.21.0-pre.2", optional = true, features = [
+burn-cubecl = { workspace = true, optional = true, features = [
+    "default",
     "fusion",
 ] }
 
 num-traits = { workspace = true }
 serial_test = { workspace = true }
+rand.workspace = true
 
 
 [dev-dependencies]
 # Used to initialize device settings (test dtypes)
-ctor = "0.8.0"
+ctor = "0.10.1"
+divan = "0.1"
+
+[[bench]]
+name = "attention"
+harness = false
+
+[[bench]]
+name = "binary_ops"
+harness = false
+
+[[bench]]
+name = "cat_max_min_ops"
+harness = false
+
+[[bench]]
+name = "comparison_ops"
+harness = false
+
+[[bench]]
+name = "conv_ops"
+harness = false
+
+[[bench]]
+name = "conv_transpose_ops"
+harness = false
+
+[[bench]]
+name = "cross_unfold_ops"
+harness = false
+
+[[bench]]
+name = "cumulative_ops"
+harness = false
+
+[[bench]]
+name = "default_ops"
+harness = false
+
+[[bench]]
+name = "deform_conv_ops"
+harness = false
+
+[[bench]]
+name = "fft_ops"
+harness = false
+
+[[bench]]
+name = "gather_scatter_ops"
+harness = false
+
+[[bench]]
+name = "int_ops"
+harness = false
+
+[[bench]]
+name = "interpolate_ops"
+harness = false
+
+[[bench]]
+name = "matmul"
+harness = false
+
+[[bench]]
+name = "norm_ops"
+harness = false
+
+[[bench]]
+name = "pool_ops"
+harness = false
+
+[[bench]]
+name = "quantization_ops"
+harness = false
+
+[[bench]]
+name = "reduce_ops"
+harness = false
+
+[[bench]]
+name = "slice_ops"
+harness = false
+
+[[bench]]
+name = "softmax_ops"
+harness = false
+
+[[bench]]
+name = "unary_ops"
+harness = false

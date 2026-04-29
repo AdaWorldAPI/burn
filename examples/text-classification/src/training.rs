@@ -32,10 +32,16 @@ pub struct ExperimentConfig {
     pub optimizer: AdamConfig,
     #[config(default = "SeqLengthOption::Fixed(256)")]
     pub seq_length: SeqLengthOption,
-    #[config(default = 16)]
+    #[config(default = 8)]
     pub batch_size: usize,
     #[config(default = 5)]
     pub num_epochs: usize,
+}
+
+fn create_artifact_dir(artifact_dir: &str) {
+    // Remove existing artifacts before to get an accurate learner summary
+    std::fs::remove_dir_all(artifact_dir).ok();
+    std::fs::create_dir_all(artifact_dir).ok();
 }
 
 // Define train function
@@ -46,6 +52,8 @@ pub fn train<B: AutodiffBackend, D: TextClassificationDataset + 'static>(
     config: ExperimentConfig, // Experiment configuration
     artifact_dir: &str,       // Directory to save model and config files
 ) {
+    create_artifact_dir(artifact_dir);
+
     // Initialize tokenizer
     let tokenizer = Arc::new(BertCasedTokenizer::default());
 

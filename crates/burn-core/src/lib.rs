@@ -29,10 +29,6 @@ pub mod tensor;
 // Tensor at root: `burn::Tensor`
 pub use tensor::Tensor;
 
-/// Module for visual operations
-#[cfg(feature = "vision")]
-pub mod vision;
-
 extern crate alloc;
 
 /// Backend for test cases
@@ -43,7 +39,7 @@ extern crate alloc;
     not(feature = "test-cuda"),
     not(feature = "test-rocm")
 ))]
-pub type TestBackend = burn_ndarray::NdArray<f32>;
+pub type TestBackend = burn_flex::Flex;
 
 #[cfg(all(test, feature = "test-tch"))]
 /// Backend for test cases
