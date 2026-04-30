@@ -153,26 +153,14 @@ half = { version = "2.7.1", features = [
 ], default-features = false }
 macerator = { version = "0.3.0" }
 matrixmultiply = { version = "0.3.10", default-features = false }
-# Default: upstream `ndarray` from crates.io. burn-ndarray's default build
-# uses only stable ndarray APIs (`linalg::general_mat_mul`, `ArrayView2`, etc.).
-#
-# To activate AdaWorldAPI/ndarray fast paths (AMX, MKL, runtime-dispatched
-# SIMD reductions, Q4_0), comment the line below and use the path/git source.
-# All fork-only symbol references in burn-ndarray are gated behind feature
-# flags (`simd-amx`, `mkl`, `simd-runtime-dispatch`) that are off by default.
-#
-# Two known blockers in `AdaWorldAPI/ndarray` master that prevent a direct
-# `git = "..."` dep from working today:
-#   (1) Stale submodule `crates/burn/upstream` → `tracel-ai/burn @ 76299209…`
-#       not reachable from the proxy.
-#   (2) `src/simd.rs` re-exports `crate::hpc::*` unconditionally, so
-#       `default-features = false` fails to compile against the fork; you
-#       must enable `features = ["hpc-extras"]`.
-# Once those are fixed:
-#   ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false }
-# For local dev against a vendored checkout (with `hpc-extras`):
-#   ndarray = { path = "/tmp/ada-ndarray", default-features = false, features = ["hpc-extras"] }
-ndarray = { version = "0.17.2", default-features = false }
+# `AdaWorldAPI/ndarray` — runtime-dispatched SIMD polyfill (AVX-512 → AVX2 →
+# NEON → scalar), Intel AMX via stable-Rust 1.94 inline asm, MKL bindings,
+# F16/BF16 newtypes with ScalarOperand/LinalgScalar, GGUF Q4_0, AVX-512-VNNI
+# INT8 GEMM, SIMD reductions. `default-features = false, features = ["std"]`
+# skips the `hpc-extras` umbrella (p64 + fractal research modules) while
+# keeping the full HPC core (AMX, VNNI, MKL, BF16, F16, quantized,
+# reductions, NEON wrappers, blake3-backed plane/seal/merkle).
+ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false, features = ["std"] }
 num-traits = { version = "0.2.19", default-features = false, features = [
     "libm",
 ] } # libm is for no_std
