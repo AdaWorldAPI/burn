@@ -34,6 +34,25 @@ multi-threads = [
     "matrixmultiply/threading",
 ]
 simd = ["macerator", "bytemuck", "seq-macro", "itertools"]
+
+# ============================================================================
+# AdaWorldAPI/ndarray feature passthroughs (off by default).
+# These compile cleanly against upstream crates.io ndarray today; the matching
+# `ndarray/...` features only exist on the AdaWorldAPI fork. When the workspace
+# `ndarray` source is switched to the fork (see workspace Cargo.toml), wire each
+# passthrough by adding the `"ndarray/<feature>"` string to the list.
+# ============================================================================
+# Runtime CPUID-dispatched SIMD polyfill (AVX-512 → AVX2 → NEON → scalar).
+simd-runtime-dispatch = []
+# Intel AMX tile matmul (TDPBUSD/TDPBF16PS) via stable-Rust 1.94 inline asm.
+# Active only on x86_64 Linux at runtime (CPUID + XCR0 + prctl gated).
+simd-amx = []
+# Intel MKL CBLAS backend through ndarray.
+mkl = []
+# half::f16 element type (gated until fork wires `ScalarOperand`/`LinalgScalar`).
+f16 = ["dep:half"]
+# half::bf16 element type (gated until fork wires `ScalarOperand`/`LinalgScalar`).
+bf16 = ["dep:half"]
 std = [
     "burn-autodiff",
     "burn-std/std",
@@ -78,6 +97,7 @@ rand = { workspace = true, default-features = false }
 
 # SIMD
 bytemuck = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
 itertools = { version = "0.14", optional = true }
 macerator = { workspace = true, optional = true }
 seq-macro = { version = "0.3", optional = true }

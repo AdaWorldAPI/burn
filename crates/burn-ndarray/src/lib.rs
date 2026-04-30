@@ -17,6 +17,7 @@ mod ops;
 mod parallel;
 mod rand;
 mod sharing;
+mod simd_dispatch;
 mod storage;
 mod tensor;
 

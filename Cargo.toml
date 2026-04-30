@@ -17,6 +17,7 @@ exclude = [
     "examples/notebook",
     "examples/raspberry-pi-pico",
     "examples/dqn-agent",         # gym-rs
+    "crates/burn-rustynum",       # path dep `../../../rustynum/*` not present in this checkout
 ]
 
 [workspace.package]
@@ -152,7 +153,13 @@ half = { version = "2.7.1", features = [
 ], default-features = false }
 macerator = { version = "0.3.0" }
 matrixmultiply = { version = "0.3.10", default-features = false }
+# Default: upstream `ndarray` from crates.io.
+# To enable `AdaWorldAPI/ndarray` (runtime-dispatched SIMD polyfill, Intel AMX
+# via stable-Rust inline asm, BF16/F16/INT8 vector types), comment the line
+# below and uncomment the git source. Keep `default-features = false` so
+# burn-ndarray keeps control of feature passthroughs.
 ndarray = { version = "0.17.2", default-features = false }
+# ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "main", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, features = [
     "libm",
 ] } # libm is for no_std
