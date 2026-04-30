@@ -153,13 +153,26 @@ half = { version = "2.7.1", features = [
 ], default-features = false }
 macerator = { version = "0.3.0" }
 matrixmultiply = { version = "0.3.10", default-features = false }
-# Default: upstream `ndarray` from crates.io.
-# To enable `AdaWorldAPI/ndarray` (runtime-dispatched SIMD polyfill, Intel AMX
-# via stable-Rust inline asm, BF16/F16/INT8 vector types), comment the line
-# below and uncomment the git source. Keep `default-features = false` so
-# burn-ndarray keeps control of feature passthroughs.
+# Default: upstream `ndarray` from crates.io. burn-ndarray's default build
+# uses only stable ndarray APIs (`linalg::general_mat_mul`, `ArrayView2`, etc.).
+#
+# To activate AdaWorldAPI/ndarray fast paths (AMX, MKL, runtime-dispatched
+# SIMD reductions, Q4_0), comment the line below and use the path/git source.
+# All fork-only symbol references in burn-ndarray are gated behind feature
+# flags (`simd-amx`, `mkl`, `simd-runtime-dispatch`) that are off by default.
+#
+# Two known blockers in `AdaWorldAPI/ndarray` master that prevent a direct
+# `git = "..."` dep from working today:
+#   (1) Stale submodule `crates/burn/upstream` → `tracel-ai/burn @ 76299209…`
+#       not reachable from the proxy.
+#   (2) `src/simd.rs` re-exports `crate::hpc::*` unconditionally, so
+#       `default-features = false` fails to compile against the fork; you
+#       must enable `features = ["hpc-extras"]`.
+# Once those are fixed:
+#   ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false }
+# For local dev against a vendored checkout (with `hpc-extras`):
+#   ndarray = { path = "/tmp/ada-ndarray", default-features = false, features = ["hpc-extras"] }
 ndarray = { version = "0.17.2", default-features = false }
-# ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "main", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, features = [
     "libm",
 ] } # libm is for no_std

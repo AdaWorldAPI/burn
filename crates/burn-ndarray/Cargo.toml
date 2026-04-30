@@ -43,11 +43,16 @@ simd = ["macerator", "bytemuck", "seq-macro", "itertools"]
 # passthrough by adding the `"ndarray/<feature>"` string to the list.
 # ============================================================================
 # Runtime CPUID-dispatched SIMD polyfill (AVX-512 → AVX2 → NEON → scalar).
+# Routes reductions and quantization through `ndarray::hpc::*`.
 simd-runtime-dispatch = []
 # Intel AMX tile matmul (TDPBUSD/TDPBF16PS) via stable-Rust 1.94 inline asm.
 # Active only on x86_64 Linux at runtime (CPUID + XCR0 + prctl gated).
 simd-amx = []
-# Intel MKL CBLAS backend through ndarray.
+# Intel MKL CBLAS backend through ndarray's `backend::mkl`. Requires the
+# AdaWorldAPI/ndarray fork **and** `ndarray/intel-mkl` enabled at the
+# workspace level — the forward isn't done here because crates.io ndarray
+# (the default workspace dep) doesn't expose an `intel-mkl` feature, and
+# Cargo would reject an unknown feature reference.
 mkl = []
 # half::f16 element type (gated until fork wires `ScalarOperand`/`LinalgScalar`).
 f16 = ["dep:half"]
