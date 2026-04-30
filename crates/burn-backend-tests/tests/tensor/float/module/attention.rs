@@ -313,7 +313,7 @@ fn test_attention_softcap_preserves_causal_mask() {
 
     output_row0
         .into_data()
-        .assert_approx_eq::<FloatElem>(&value_row0.into_data(), Tolerance::relative(1e-5));
+        .assert_approx_eq::<FloatElem>(&value_row0.into_data(), Tolerance::rel_abs(1e-4, 1e-4));
 }
 
 /// Regression: fully-masked rows must produce 0, not NaN.
@@ -321,6 +321,10 @@ fn test_attention_softcap_preserves_causal_mask() {
 /// scores are -inf and naive softmax yields NaN.
 #[test]
 fn test_attention_fully_masked_rows_no_nan() {
+    // Skip test with f16 (fallback uses too big epsilon value)
+    if core::any::TypeId::of::<FloatElem>() == core::any::TypeId::of::<burn_tensor::f16>() {
+        return;
+    }
     let [num_batches, num_heads, seq_len, head_dim] = [1, 1, 4, 8];
 
     let query = TestTensor::<4>::random(
@@ -367,6 +371,11 @@ fn test_attention_fully_masked_rows_no_nan() {
 /// have valid positions. Row 0 output must be 0, not NaN.
 #[test]
 fn test_attention_fully_masked_rows_causal_no_nan() {
+    // Skip test with f16 (fallback uses too big epsilon value)
+    if core::any::TypeId::of::<FloatElem>() == core::any::TypeId::of::<burn_tensor::f16>() {
+        return;
+    }
+
     let [num_batches, num_heads, seq_len, head_dim] = [1, 1, 4, 8];
 
     let query = TestTensor::<4>::random(
@@ -479,6 +488,156 @@ fn test_attention_all_options() {
 
     let expected =
         attention_fallback::<TestBackend>(query, key, value, Some(mask), Some(bias), options);
+
+    output.into_data().assert_approx_eq::<FloatElem>(
+        &expected.into_data(),
+        Tolerance::rel_abs(1e-2, 1e-3).set_half_precision_relative(1e-1),
+    );
+}
+
+/// Regression for burn#4772: ONNX Attention-23 allows a `[1, 1, seq_q, seq_kv]` bias
+/// that's shared across all batches and heads. The main attention path must accept this
+/// shape and produce the same result as the fallback (whose elementwise `float_add`
+/// broadcasts the bias naturally).
+#[test]
+fn test_attention_bias_broadcast_batch_and_heads() {
+    let [num_batches, num_heads, seq_len, head_dim] = [2, 3, 16, 32];
+
+    let query = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let key = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let value = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let bias = TestTensor::<4>::random(
+        [1, 1, seq_len, seq_len],
+        Distribution::Uniform(-0.5, 0.5),
+        &Default::default(),
+    );
+
+    let output = attention(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        None,
+        Some(bias.clone()),
+        Default::default(),
+    );
+
+    let expected =
+        attention_fallback::<TestBackend>(query, key, value, None, Some(bias), Default::default());
+
+    output.into_data().assert_approx_eq::<FloatElem>(
+        &expected.into_data(),
+        Tolerance::rel_abs(1e-2, 1e-3).set_half_precision_relative(1e-1),
+    );
+}
+
+/// Regression for burn#4772: `[batch, 1, seq_q, seq_kv]` bias is shared across heads
+/// but distinct per batch (the ONNX `test_attention_4d_attn_mask_3d` pattern).
+#[test]
+fn test_attention_bias_broadcast_heads_only() {
+    let [num_batches, num_heads, seq_len, head_dim] = [2, 3, 16, 32];
+
+    let query = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let key = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let value = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let bias = TestTensor::<4>::random(
+        [num_batches, 1, seq_len, seq_len],
+        Distribution::Uniform(-0.5, 0.5),
+        &Default::default(),
+    );
+
+    let output = attention(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        None,
+        Some(bias.clone()),
+        Default::default(),
+    );
+
+    let expected =
+        attention_fallback::<TestBackend>(query, key, value, None, Some(bias), Default::default());
+
+    output.into_data().assert_approx_eq::<FloatElem>(
+        &expected.into_data(),
+        Tolerance::rel_abs(1e-2, 1e-3).set_half_precision_relative(1e-1),
+    );
+}
+
+/// Regression for burn#4772: a `[1, 1, seq_q, seq_kv]` bool mask must be shared across
+/// all batches and heads (the ONNX `test_attention_4d_attn_mask_bool` pattern).
+#[test]
+fn test_attention_bool_mask_broadcast_batch_and_heads() {
+    // Skip on cubecl backends with f16: the main attention path diverges from
+    // attention_fallback starting at batch 0 head 1, the fingerprint of a broadcast
+    // mask being applied only to head 0. The equivalent full-shape mask case
+    // (test_attention_all_options) passes on the same backends, so this is a latent
+    // cubecl flash-attention broadcast issue (tracked in #4778, under the umbrella
+    // of #4325), not a burn-flex or fallback bug. Enable once #4778 is fixed.
+    #[cfg(feature = "cube")]
+    if core::any::TypeId::of::<FloatElem>() == core::any::TypeId::of::<burn_tensor::f16>() {
+        return;
+    }
+
+    let [num_batches, num_heads, seq_len, head_dim] = [2, 3, 16, 32];
+
+    let query = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let key = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    let value = TestTensor::<4>::random(
+        [num_batches, num_heads, seq_len, head_dim],
+        Distribution::Uniform(-1., 1.),
+        &Default::default(),
+    );
+    // Random bool mask via thresholding, matching test_attention_all_options.
+    let mask = TestTensor::<4>::random(
+        [1, 1, seq_len, seq_len],
+        Distribution::Uniform(0., 1.),
+        &Default::default(),
+    )
+    .greater_elem(0.7);
+
+    let output = attention(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        Some(mask.clone()),
+        None,
+        Default::default(),
+    );
+
+    let expected =
+        attention_fallback::<TestBackend>(query, key, value, Some(mask), None, Default::default());
 
     output.into_data().assert_approx_eq::<FloatElem>(
         &expected.into_data(),

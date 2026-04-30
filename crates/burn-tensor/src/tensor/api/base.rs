@@ -1031,35 +1031,46 @@ where
         //sort the indices
         dim_indices.sort_unstable();
 
-        //Now use this to copy the chunks of the dims
-        let mut prev_idx: usize = 0;
-        let mut current_left_b: usize = 0;
-        let mut current_right_b: usize = 0;
-        let mut offset: usize = 0;
-        dim_indices.iter().for_each(|d| {
-            //check if there is space for at least one dimension
-            if prev_idx < *d {
-                current_right_b = *d - offset;
-                //copy the chunks of the dims
-                if current_right_b < D {
-                    new_dims[prev_idx..*d]
-                        .copy_from_slice(&old_dims[current_left_b..current_right_b]);
-                } else {
-                    new_dims[prev_idx..*d].copy_from_slice(&old_dims[current_left_b..]);
-                }
-                prev_idx = *d + 1;
-                //offset is equal to the number of extracted elements from the original shape
-                offset += current_right_b - current_left_b;
-                current_left_b = current_right_b;
-            } else {
-                //it's sorted so the only reason this would happen
-                //is if multiple indices are the same
-                prev_idx += 1;
+        // Per the documented semantics, duplicate axes mean "insert N dims at that index".
+        // After sorting, N insertions at position `i` logically occupy positions
+        // `i, i+1, ..., i+N-1` in the output, so bump each duplicate to the next slot.
+        // Example: sorted `[0, 0, 3]` becomes `[0, 1, 3]`, matching the intent of
+        // "two 1s starting at index 0, plus one 1 at index 3".
+        for i in 1..dim_indices.len() {
+            if dim_indices[i] <= dim_indices[i - 1] {
+                dim_indices[i] = dim_indices[i - 1] + 1;
             }
-        });
-        //copy over anything past the index of the last new dimension
-        if current_left_b < D {
-            new_dims[prev_idx..].copy_from_slice(&old_dims[current_left_b..]);
+        }
+
+        // Re-validate after normalization: bumping duplicates forward can push the
+        // last index past `D2 - 1` (e.g. `[2, 2]` targeting rank 3 normalizes to
+        // `[2, 3]`). The per-axis check above only runs on pre-normalization values,
+        // so we re-check here to surface a clear `TensorCheck` error instead of
+        // letting the copy loop panic on an out-of-bounds `old_dims` read.
+        for &dim_index in &dim_indices {
+            check!(TensorCheck::unsqueeze_dims::<{ D2 }>(dim_index as isize));
+        }
+
+        // Loop over the entries/indices of the `new_dims` array.
+        // When the current entry should be 1 from the unsqueeze operation, simply increment
+        // the index for `dims_indices` to account for "adding" its entry to `new_dims`.
+        // Otherwise, the dim from the current entry of `old_dims` should be copied to `new_dims`.
+        let mut dim_indices_curr_idx = 0;
+        let mut old_dims_curr_idx = 0;
+        for new_dims_curr_idx in 0..D2 {
+            // If all indices in `dim_indices` have been processed, then
+            // simply copy all the remaining dims from `old_dims` to `new_dims`
+            if dim_indices_curr_idx == dim_indices.len() {
+                new_dims[new_dims_curr_idx..].copy_from_slice(&old_dims[old_dims_curr_idx..]);
+                break;
+            }
+
+            if new_dims_curr_idx == dim_indices[dim_indices_curr_idx] {
+                dim_indices_curr_idx += 1;
+            } else {
+                new_dims[new_dims_curr_idx] = old_dims[old_dims_curr_idx];
+                old_dims_curr_idx += 1;
+            }
         }
 
         //lastly, create the shape and reshape
@@ -1787,6 +1798,9 @@ where
     /// # Warning
     /// Not all backends have runtime bound checks for the indices, so make sure the they are valid.
     /// Otherwise, out of bounds indices could lead to unexpected results instead of panicking.
+    ///
+    /// # Panics
+    /// If the `update` is not `IndexingUpdateOp::Add`. Other operations are currently not implemented.
     pub fn scatter(
         self,
         dim: usize,
@@ -1808,6 +1822,65 @@ where
             values.primitive,
             update,
         ))
+    }
+
+    /// Multi-dimensional scatter: update `self` at locations given by `indices` using the specified `update` operation.
+    ///
+    /// The size of `indices`'s last axis (call it `K`) indexes the leading `K` dims of `self`;
+    /// the batch shape `indices.shape[0..M-1]` is preserved. `values` has shape
+    /// `indices.shape[0..M-1] ++ self.shape[K..D]`. Constraints: `K <= D` and `M >= 1`.
+    ///
+    /// # Arguments
+    /// * `indices` - The indices of the elements to scatter.
+    /// * `values` - The values to scatter into the tensor.
+    /// * `update` - The operation used to update the existing values at the indexed positions (e.g., add).
+    ///
+    /// # Note
+    ///
+    /// When `indices` contains duplicate entries, the result is non-deterministic on GPU
+    /// backends (matching ONNX ScatterND semantics). CPU backends are deterministic regardless
+    /// of reduction. For deterministic accumulation with duplicates, run on a CPU backend.
+    ///
+    /// # Warning
+    ///
+    /// Not all backends have runtime bound checks for the indices, so make sure they are valid.
+    /// Otherwise, out of bounds indices could lead to unexpected results instead of panicking.
+    pub fn scatter_nd<const M: usize, const DV: usize>(
+        self,
+        indices: Tensor<B, M, Int>,
+        values: Tensor<B, DV, K>,
+        update: IndexingUpdateOp,
+    ) -> Self {
+        check!(TensorCheck::scatter_nd::<D, M, DV>(
+            &self.shape(),
+            &indices.shape(),
+            &values.shape()
+        ));
+        Self::new(K::scatter_nd(
+            self.primitive,
+            indices.primitive,
+            values.primitive,
+            update,
+        ))
+    }
+
+    /// Multi-dimensional gather: collect slices from `self` at multi-index locations
+    /// specified by `indices`.
+    ///
+    /// The size of `indices`'s last axis (call it `K`) indexes the leading `K` dims of `self`;
+    /// the batch shape `indices.shape[0..M-1]` is preserved. The output has shape
+    /// `indices.shape[0..M-1] ++ self.shape[K..D]`. Constraints: `K <= D` and `M >= 1`.
+    ///
+    /// # Warning
+    ///
+    /// Not all backends have runtime bound checks for the indices, so make sure they are valid.
+    /// Otherwise, out of bounds indices could lead to unexpected results instead of panicking.
+    pub fn gather_nd<const M: usize, const DV: usize>(
+        self,
+        indices: Tensor<B, M, Int>,
+    ) -> Tensor<B, DV, K> {
+        check!(TensorCheck::gather_nd::<D, M, DV>(&indices.shape()));
+        Tensor::new(K::gather_nd(self.primitive, indices.primitive))
     }
 
     /// Converts the data of the current tensor.
