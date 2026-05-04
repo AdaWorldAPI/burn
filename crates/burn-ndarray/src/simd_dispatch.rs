@@ -2,7 +2,7 @@
 //! AdaWorldAPI/ndarray fork.
 //!
 //! All dispatch is **unconditional** — the fork's `backend::native`
-//! polyfill provides runtime LazyLock<Tier> dispatch (AVX-512 / AVX2+FMA /
+//! polyfill provides runtime `LazyLock<Tier>` dispatch (AVX-512 / AVX2+FMA /
 //! scalar), and `ndarray::backend::{gemm_f32, gemm_f64, dot_f32, ...}`
 //! routes to MKL → OpenBLAS → native depending on which (optional) FFI
 //! features are enabled at the ndarray level. With no FFI features, the
@@ -89,16 +89,15 @@ pub(crate) fn matmul_2d<E: NdArrayElement>(
     // (1) AMX f32 — runtime gated.
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     {
-        if amx_available() {
-            if let (Some(l), Some(r), Some(o)) = (
+        if amx_available()
+            && let (Some(l), Some(r), Some(o)) = (
                 try_view_as_f32(&lhs),
                 try_view_as_f32(&rhs),
                 try_view_mut_as_f32(out),
-            ) {
-                if ndarray::hpc::amx_matmul::matmul_f32(l, r, o).is_ok() {
-                    return;
-                }
-            }
+            )
+            && ndarray::hpc::amx_matmul::matmul_f32(l, r, o).is_ok()
+        {
+            return;
         }
     }
 
@@ -110,6 +109,7 @@ pub(crate) fn matmul_2d<E: NdArrayElement>(
 }
 
 /// Reshape + dispatch helper preserving the original 3D batched-matmul loop.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn matmul_batched<E: NdArrayElement>(
     lhs: SharedArray<E>,
     rhs: SharedArray<E>,
