@@ -5563,6 +5563,7 @@ dependencies = [
 [[package]]
 name = "ndarray"
 version = "0.17.2"
+source = "git+https://github.com/AdaWorldAPI/ndarray?branch=master#c779c5b53707cfab3e604640c014b5aae60998ca"
 dependencies = [
  "blake3",
  "cblas-sys",
