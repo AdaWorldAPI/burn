@@ -31,7 +31,9 @@ env:
   # Note: It is not possible to define top level env vars and pass them to composite actions.
   # To work around this issue we use inputs and define all the env vars here.
 
-  RUST_PREVIOUS_VERSION: 1.92.0
+  # Bumped from 1.92.0 to 1.94.0: AdaWorldAPI/ndarray (the workspace `ndarray`
+  # source) requires Rust 1.94 for stable inline-asm AMX intrinsics.
+  RUST_PREVIOUS_VERSION: 1.94.0
 
   # Dependency versioning
   # from wgpu repo: https://github.com/gfx-rs/wgpu/blob/trunk/.github/workflows/ci.yml
