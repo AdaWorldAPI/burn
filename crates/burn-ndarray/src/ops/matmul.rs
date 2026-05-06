@@ -1,10 +1,8 @@
-use crate::UnsafeSharedRef;
-use crate::{NdArrayElement, ShapeOps, SharedArray, iter_range_par, ops::NdArrayOps, run_par};
+use crate::{NdArrayElement, ShapeOps, SharedArray, ops::NdArrayOps, simd_dispatch};
 
 use alloc::{vec, vec::Vec};
-use burn_backend::ElementConversion;
 use burn_backend::Shape;
-use ndarray::{IxDyn, s};
+use ndarray::IxDyn;
 
 pub(crate) fn matmul<E: NdArrayElement>(
     lhs: SharedArray<E>,
@@ -26,47 +24,21 @@ pub(crate) fn matmul<E: NdArrayElement>(
     let num_r_batches = shape_rhs.num_elements() / r_mat_size;
     let num_out_batches = out_shape.num_elements() / out_mat_size;
 
-    let lhs_array = NdArrayOps::reshape(lhs, Shape::new([num_l_batches, m, k]));
-    let rhs_array = NdArrayOps::reshape(rhs, Shape::new([num_r_batches, k, n]));
+    let out_array = simd_dispatch::matmul_batched::<E>(
+        lhs,
+        rhs,
+        num_l_batches,
+        num_r_batches,
+        num_out_batches,
+        m,
+        k,
+        n,
+        &strides_lhs.strides,
+        &strides_rhs.strides,
+        &strides_out.strides,
+    );
 
-    let alpha: E = 1.0.elem();
-    let beta: E = 0.0.elem();
-
-    let out = run_par!(|| {
-        let mut out_array = ndarray::Array3::<E>::zeros((num_out_batches, m, n));
-        let unsafe_shared_out_array = UnsafeSharedRef::new(&mut out_array);
-
-        iter_range_par!(0, num_out_batches).for_each(|out_batch| {
-            // Here, we:
-            //   1. Un-flatten the output batch into a component-based batch index.
-            //   2. Use the strides for left and right batch indices to convert it to a flattened
-            //      batch for left and right.
-            let out_index = strides_out.unflatten(out_batch);
-            let l_batch = strides_lhs.flatten(&out_index);
-            let r_batch = strides_rhs.flatten(&out_index);
-
-            let lhs_slice = lhs_array.slice(s!(l_batch, .., ..));
-            let rhs_slice = rhs_array.slice(s!(r_batch, .., ..));
-
-            unsafe {
-                let mut out_slice = unsafe_shared_out_array
-                    .get()
-                    .slice_mut(s!(out_batch, .., ..));
-
-                ndarray::linalg::general_mat_mul(
-                    alpha,
-                    &lhs_slice,
-                    &rhs_slice,
-                    beta,
-                    &mut out_slice,
-                )
-            }
-        });
-
-        out_array.into_shared().into_dyn()
-    });
-
-    NdArrayOps::reshape(out, out_shape)
+    NdArrayOps::reshape(out_array.into_shared().into_dyn(), out_shape)
 }
 
 #[derive(Debug, PartialEq)]
@@ -76,25 +48,6 @@ struct Strides {
 impl Strides {
     fn new(strides: Vec<usize>) -> Self {
         Strides { strides }
-    }
-
-    fn unflatten(&self, linear_index: usize) -> Vec<usize> {
-        let mut coord = Vec::with_capacity(self.strides.len());
-        let mut rem = linear_index;
-        for stride in self.strides.iter() {
-            coord.push(rem / stride);
-            rem %= stride;
-        }
-        coord
-    }
-
-    fn flatten(&self, index: &Vec<usize>) -> usize {
-        assert_eq!(self.strides.len(), index.len());
-        self.strides
-            .iter()
-            .zip(index)
-            .map(|(stride, index)| stride * index)
-            .sum()
     }
 }
 

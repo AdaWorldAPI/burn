@@ -105,7 +105,20 @@ where
             | DType::U16
             | DType::U8
             | DType::Bool(BoolStore::Native) => burn_backend::DTypeUsage::general(),
-            DType::F16 | DType::BF16 | DType::Bool(_) => burn_backend::DTypeUsageSet::empty(),
+            // F16/BF16 are claimed only when the matching feature is enabled.
+            // The `NdArrayTensor` enum does not yet carry F16/BF16 variants —
+            // adding them is gated on the workspace `ndarray` source pointing
+            // at `AdaWorldAPI/ndarray` (which provides `ScalarOperand` /
+            // `LinalgScalar` impls for `half::f16` / `half::bf16`).
+            #[cfg(feature = "f16")]
+            DType::F16 => burn_backend::DTypeUsage::general(),
+            #[cfg(feature = "bf16")]
+            DType::BF16 => burn_backend::DTypeUsage::general(),
+            #[cfg(not(feature = "f16"))]
+            DType::F16 => burn_backend::DTypeUsageSet::empty(),
+            #[cfg(not(feature = "bf16"))]
+            DType::BF16 => burn_backend::DTypeUsageSet::empty(),
+            DType::Bool(_) => burn_backend::DTypeUsageSet::empty(),
             DType::QFloat(scheme) => {
                 match scheme {
                     QuantScheme {

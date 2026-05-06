@@ -34,6 +34,11 @@ multi-threads = [
     "matrixmultiply/threading",
 ]
 simd = ["macerator", "bytemuck", "seq-macro", "itertools"]
+
+# half::f16 / half::bf16 element types — kept off until the
+# `NdArrayTensor::F16` / `BF16` enum variants land.
+f16 = ["dep:half"]
+bf16 = ["dep:half"]
 std = [
     "burn-autodiff",
     "burn-std/std",
@@ -78,6 +83,7 @@ rand = { workspace = true, default-features = false }
 
 # SIMD
 bytemuck = { workspace = true, optional = true }
+half = { workspace = true, optional = true }
 itertools = { version = "0.14", optional = true }
 macerator = { workspace = true, optional = true }
 seq-macro = { version = "0.3", optional = true }
