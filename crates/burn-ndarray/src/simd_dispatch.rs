@@ -3,13 +3,17 @@
 //!
 //! All dispatch is **unconditional** — the fork's `backend::native`
 //! provides a pure-Rust BLAS surface (CBLAS-compatible API names; the
-//! impl is reverse-engineered, not an Intel library) with runtime
-//! `LazyLock<Tier>` dispatch over x86-v4 AVX-512 / AVX2+FMA / scalar
-//! intrinsics. `ndarray::backend::{gemm_f32, gemm_f64, dot_f32, ...}` is
-//! the universally-available entry point. The optional `intel-mkl` /
-//! `openblas` features in the fork swap the underlying impl for a real
-//! native library; with no FFI features (the default), the pure-Rust
-//! reverse-engineered backend carries the load.
+//! impl is reverse-engineered, not an Intel library). It runs on the
+//! fork's hand-rolled SIMD polyfill `ndarray::simd::F32x16`/`F64x8`/etc.
+//! — built on stable-Rust `__m512` / `__m256` / `float32x4_t` intrinsics
+//! organised by ISA in `simd_avx512.rs` / `simd_avx2.rs` / `simd_neon.rs`
+//! / `simd_wasm.rs`, dispatched once at startup via `LazyLock<Tier>` in
+//! `simd.rs`. (Not `std::simd` — that's nightly-only via `portable_simd`;
+//! the polyfill is forward-compat: when `std::simd` stabilises, `simd.rs`
+//! gets swapped with zero consumer changes.)
+//!
+//! `ndarray::backend::{gemm_f32, gemm_f64, dot_f32, ...}` is the
+//! universally-available entry point.
 //!
 //! `hpc::vml::*` (vectorized math: exp, log, sqrt, erf, etc.) is also
 //! reverse-engineered pure-Rust SIMD on `F32x16` / `F64x8`, not Intel VML.
