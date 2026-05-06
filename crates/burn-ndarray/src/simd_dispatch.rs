@@ -2,15 +2,23 @@
 //! AdaWorldAPI/ndarray fork.
 //!
 //! All dispatch is **unconditional** — the fork's `backend::native`
-//! polyfill provides runtime `LazyLock<Tier>` dispatch (AVX-512 / AVX2+FMA /
-//! scalar), and `ndarray::backend::{gemm_f32, gemm_f64, dot_f32, ...}`
-//! routes to MKL → OpenBLAS → native depending on which (optional) FFI
-//! features are enabled at the ndarray level. With no FFI features, the
-//! native polyfill carries the load.
+//! provides a pure-Rust BLAS surface (CBLAS-compatible API names; the
+//! impl is reverse-engineered, not an Intel library) with runtime
+//! `LazyLock<Tier>` dispatch over x86-v4 AVX-512 / AVX2+FMA / scalar
+//! intrinsics. `ndarray::backend::{gemm_f32, gemm_f64, dot_f32, ...}` is
+//! the universally-available entry point. The optional `intel-mkl` /
+//! `openblas` features in the fork swap the underlying impl for a real
+//! native library; with no FFI features (the default), the pure-Rust
+//! reverse-engineered backend carries the load.
 //!
-//! AMX f32/i8/bf16 matmul (Intel Sapphire Rapids+) is taken whenever
-//! available at runtime; otherwise we fall through to the polyfilled
-//! GEMM. INT8 GEMM goes AMX → VNNI → polyfilled scalar fallback.
+//! `hpc::vml::*` (vectorized math: exp, log, sqrt, erf, etc.) is also
+//! reverse-engineered pure-Rust SIMD on `F32x16` / `F64x8`, not Intel VML.
+//!
+//! AMX f32/i8/bf16 matmul (Intel Sapphire Rapids+ hardware, but software
+//! is stable inline asm — no Intel library involvement) is taken whenever
+//! available at runtime; otherwise we fall through to the reverse-engineered
+//! BLAS. INT8 GEMM goes AMX → AVX-512-VNNI → scalar fallback inside the
+//! fork's `int8_gemm_f32`.
 //!
 //! This module is the single file to edit if dispatch policy changes.
 

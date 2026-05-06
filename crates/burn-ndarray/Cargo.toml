@@ -35,14 +35,6 @@ multi-threads = [
 ]
 simd = ["macerator", "bytemuck", "seq-macro", "itertools"]
 
-# Optional FFI passthroughs to swap the always-on pure-Rust polyfilled
-# CBLAS surface (`ndarray::backend::native` — LazyLock AVX-512/AVX2/scalar
-# dispatch) for a real native library. burn-ndarray always uses the
-# polyfilled `backend::*` API; these features only change which
-# implementation backs it. The polyfilled MKL/BLAS is universally
-# available and is the default — no opt-in needed for that.
-mkl = ["ndarray/intel-mkl"]
-openblas-fork = ["ndarray/openblas"]
 # half::f16 / half::bf16 element types — kept off until the
 # `NdArrayTensor::F16` / `BF16` enum variants land.
 f16 = ["dep:half"]
