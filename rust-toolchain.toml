@@ -1,3 +1,5 @@
 [toolchain]
-channel = "1.94.1"
+# Bump log (append-only — add a line here, don't rewrite prose elsewhere):
+#   2026-09-05: 1.94.1 -> 1.98.1, joins the workspace-wide 1.98.1 sweep.
+channel = "1.98.1"
 components = ["clippy", "rustfmt"]
