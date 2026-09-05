@@ -28,6 +28,7 @@
 
 use crate::{NdArrayElement, SharedArray};
 use burn_backend::{ElementConversion, Shape};
+#[cfg(feature = "std")] // only the std-gated f32 view casts use it
 use core::any::TypeId;
 use ndarray::s;
 
@@ -38,6 +39,7 @@ use ndarray::s;
 /// Returns `true` when the running CPU has Intel AMX hardware enabled and
 /// usable. Always `false` outside x86_64 Linux.
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)] // used only under `feature = "amx-f32"`
 pub fn amx_available() -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -60,6 +62,7 @@ pub fn amx_available() -> bool {
 // `ArrayView2<f32>` are then the same monomorphization.
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)] // used only under `feature = "amx-f32"`
 fn try_view_as_f32<'a, E: 'static>(
     view: &ndarray::ArrayView2<'a, E>,
@@ -72,6 +75,7 @@ fn try_view_as_f32<'a, E: 'static>(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)] // used only under `feature = "amx-f32"`
 fn try_view_mut_as_f32<'a, E: 'static>(
     view: &mut ndarray::ArrayViewMut2<'a, E>,
@@ -114,7 +118,12 @@ pub(crate) fn matmul_2d<E: NdArrayElement>(
     // taking this path unconditionally fails 50 tests (25 qr, 13 lu, 7 svd,
     // 3 det, 1 attention) that pass at 1826/1826 without it. Enable only for
     // workloads that have measured bf16-grade matmul as acceptable.
-    #[cfg(all(target_arch = "x86_64", target_os = "linux", feature = "amx-f32"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        feature = "std",
+        feature = "amx-f32"
+    ))]
     {
         if amx_available()
             && let (Some(l), Some(r), Some(o)) = (
@@ -205,6 +214,7 @@ fn flatten(strides: &[usize], index: &[usize]) -> usize {
 ///
 /// Routes through `ndarray::hpc::quantized::int8_gemm_f32`, which dispatches
 /// AMX/VNNI/scalar internally.
+#[cfg(feature = "std")]
 #[allow(clippy::too_many_arguments, dead_code)]
 pub fn int8_gemm_f32(
     a: &[u8],
@@ -225,42 +235,49 @@ pub fn int8_gemm_f32(
 // ============================================================================
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn sum_f32(s: &[f32]) -> f32 {
     ndarray::hpc::reductions::sum_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn mean_f32(s: &[f32]) -> Option<f32> {
     ndarray::hpc::reductions::mean_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn max_f32(s: &[f32]) -> Option<f32> {
     ndarray::hpc::reductions::max_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn min_f32(s: &[f32]) -> Option<f32> {
     ndarray::hpc::reductions::min_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn argmax_f32(s: &[f32]) -> Option<usize> {
     ndarray::hpc::reductions::argmax_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn argmin_f32(s: &[f32]) -> Option<usize> {
     ndarray::hpc::reductions::argmin_f32(ndarray::ArrayView1::from(s))
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn nrm2_f32(s: &[f32]) -> f32 {
     ndarray::hpc::reductions::nrm2_f32(ndarray::ArrayView1::from(s))
@@ -271,18 +288,21 @@ pub fn nrm2_f32(s: &[f32]) -> f32 {
 // ============================================================================
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn quantize_f32_to_q4_0(data: &[f32]) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<f32>) {
     ndarray::hpc::quantized::quantize_f32_to_q4_0(data)
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn dequantize_q4_0_to_f32(packed: &[u8], scales: &[f32]) -> alloc::vec::Vec<f32> {
     ndarray::hpc::quantized::dequantize_q4_0_to_f32(packed, scales)
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn quantize_f32_to_i8(
     data: &[f32],
@@ -291,6 +311,7 @@ pub fn quantize_f32_to_i8(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn dequantize_i8_to_f32(
     codes: &[i8],
@@ -301,6 +322,7 @@ pub fn dequantize_i8_to_f32(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn quantize_f32_to_i4(
     data: &[f32],
@@ -309,6 +331,7 @@ pub fn quantize_f32_to_i4(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn dequantize_i4_to_f32(
     packed: &[u8],
@@ -319,6 +342,7 @@ pub fn dequantize_i4_to_f32(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn quantize_f32_to_i2(
     data: &[f32],
@@ -327,6 +351,7 @@ pub fn quantize_f32_to_i2(
 }
 
 #[inline]
+#[cfg(feature = "std")] // `ndarray::hpc` / `::backend` exist only with std
 #[allow(dead_code)]
 pub fn dequantize_i2_to_f32(
     packed: &[u8],
@@ -342,7 +367,7 @@ pub fn dequantize_i2_to_f32(
 /// it becomes exact — because exactness would mean the fork gained a true f32
 /// path, and the `amx-f32` gate above should then be reconsidered rather than
 /// left off on stale evidence.
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod amx_probe {
     #[test]
     fn amx_f32_is_bf16_grade_not_exact_and_not_garbage() {
