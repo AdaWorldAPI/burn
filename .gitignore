@@ -25,6 +25,10 @@ uv.lock
 tags
 
 examples/**/Cargo.lock
+# The workspace tracks no lockfile: a committed lock is a second authority on
+# dependency versions and re-conflicts on every upstream resync. Bins that need
+# a reproducible build pin it at the deploy edge, not in-tree.
+/Cargo.lock
 
 # rustc self-profiling files
 *.mm_profdata
