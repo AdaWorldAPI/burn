@@ -152,7 +152,17 @@ half = { version = "2.7.1", features = [
 ], default-features = false }
 macerator = { version = "0.3.4" }
 matrixmultiply = { version = "0.3.10", default-features = false }
-ndarray = { version = "0.17.2", default-features = false }
+# `AdaWorldAPI/ndarray` — runtime-dispatched SIMD polyfill (AVX-512 → AVX2 →
+# NEON → scalar), Intel AMX via stable-Rust inline asm, F16/BF16 newtypes with
+# ScalarOperand/LinalgScalar, AVX-512-VNNI INT8 GEMM, SIMD reductions.
+# `default-features = false` skips the `hpc-extras` umbrella (p64 + fractal
+# research modules) while keeping the HPC core.
+# This dep is the reason the workspace pins a toolchain — see rust-toolchain.toml.
+# NO `features = ["std"]` here: burn-ndarray must build no_std, and its own
+# `std` feature forwards `ndarray/std` when std is wanted. Forcing it at the
+# workspace level pulled `num-traits/std` + `matrixmultiply/std` into the
+# no_std CI build and broke it (burn#9, linux-no-std-tests).
+ndarray = { git = "https://github.com/AdaWorldAPI/ndarray", branch = "master", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, features = [
     "libm",
 ] } # libm is for no_std
